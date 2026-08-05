@@ -4,6 +4,13 @@ A Rock Band-style vocal trainer for singers. It shows your sung pitch against th
 song, in real time, so you can see *where* you are flat or sharp rather than just being told
 that you are.
 
+![The Standalone practising against a chart: target notes scrolling right to left, with the live sung pitch traced against them](docs/demo.gif)
+
+Blue bars are the target notes and the bright one at the now-line is the note due right now.
+The green trace is the live sung pitch, and the faint grey line behind it is the reference
+contour the chart was built from. Bottom left reads out cents, clarity and input level.
+*(The lyric strip is spliced out of this capture.)*
+
 Two halves:
 
 - **The plugin** (C++ / JUCE 9) — a zero-latency audio effect that sits on the mic track.
