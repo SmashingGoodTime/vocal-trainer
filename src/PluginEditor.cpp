@@ -559,12 +559,45 @@ void VocalTrainerEditor::updateFooter()
     if (r.voiced && r.octaveOffset != 0)
         text << "   |   " << (r.octaveOffset > 0 ? "+" : "") << r.octaveOffset << " octave";
 
-    TransportSnapshot snap;
-
-    if (processor.readTransport (snap))
+    // WHICH TRANSPORT OWNS THE CLOCK decides what this readout can honestly say.
+    //
+    // TransportSnapshot is filled from getPlayHead() in processBlock, so in the
+    // Standalone — where there is no host — it never carries anything but the
+    // fallbacks seeded there: isPlaying=false, bpm=120. Printing it regardless
+    // of wrapper is why this line read "stopped @ 120.0 bpm" permanently, right
+    // through actual playback, and reported a tempo nothing was running at.
+    //
+    // The split is the same one getBackingPlayer() and currentChartTime()
+    // already draw: the backing track is the Standalone's transport, the host
+    // playhead is the VST3's. Ask whichever is real.
+    if (processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone)
     {
-        text << "   |   " << (snap.isPlaying ? "playing" : "stopped")
-             << " @ " << juce::String (snap.bpm, 1) << " bpm";
+        const auto& backing = processor.getBackingPlayer();
+
+        // Free sing has no transport at all — say nothing rather than invent one.
+        if (backing.hasTrack())
+        {
+            const auto clock = [] (double seconds)
+            {
+                const auto total = juce::jmax (0, juce::roundToInt (seconds));
+                return juce::String (total / 60) + ":"
+                         + juce::String (total % 60).paddedLeft ('0', 2);
+            };
+
+            text << "   |   " << (backing.isPlaying() ? "playing" : "stopped")
+                 << " " << clock (backing.getPositionSeconds())
+                 << " / " << clock (backing.getLengthSeconds());
+        }
+    }
+    else
+    {
+        TransportSnapshot snap;
+
+        if (processor.readTransport (snap))
+        {
+            text << "   |   " << (snap.isPlaying ? "playing" : "stopped")
+                 << " @ " << juce::String (snap.bpm, 1) << " bpm";
+        }
     }
 
     if (theme->hasParseError())
