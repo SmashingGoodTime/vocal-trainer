@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vocalchart"
+version = "0.1.0"
+description = "Offline pipeline that turns a song into a vocal note chart (chart.json) for the Vocal Trainer plugin."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "SmashingGoodTime" }]
+keywords = ["pitch", "f0", "karaoke", "vocal", "ultrastar", "swift-f0"]
+
+# ANALYSIS dependencies only - this venv stays ONNX-only.
+#
+# Deliberately absent, see DESIGN.md section 4:
+#   torch        - SwiftF0 is ONNX-only, and faster-whisper covers stage 3 without it.
+#                  Stage 0 (separation) DOES need torch, which is precisely why it runs
+#                  in a separate venv (.venv-separate) reached by subprocess: installing
+#                  torch here, after faster-whisper, is what produces the
+#                  "Could not locate cudnn_ops64_9.dll" failure in DESIGN.md:375.
+#                  See vocalchart/separate.py.
+#   basic-pitch  - frozen at 0.4.0; drags tensorflow<2.15.1 which forces numpy<2.
+#   madmom       - 2018 sdist, no wheels, needs MSVC, and is non-commercial licensed.
+#   crepe        - requires an undeclared TensorFlow.
+#   spleeter     - TF1-era, worst separation quality (~5.9 dB SDR).
+dependencies = [
+    "swift-f0==0.1.2",
+    "librosa>=0.11.0",
+    "numpy>=2.1",
+    "scipy>=1.13",
+    "click>=8.1",
+    "soundfile>=0.12",
+    "mir_eval>=0.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+vocalchart = "vocalchart.cli:main"
+
+[tool.setuptools]
+packages = ["vocalchart"]
+
+[tool.setuptools.package-data]
+vocalchart = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

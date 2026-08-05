@@ -1,0 +1,13 @@
+#TITLE:Untitled
+#ARTIST:Unknown
+#MP3:backing.wav
+#BPM:800
+#GAP:568
+: 0 52 -5 oh
+: 52 100 0 ~
+: 152 27 4 ~
+: 179 27 0 ~
+: 207 72 0 ~
+: 279 51 4 ~
+: 330 49 2 ~
+E

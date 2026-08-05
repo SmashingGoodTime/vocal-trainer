@@ -1,0 +1,30 @@
+# Normalise line endings on commit; check out native. Without this, a repo
+# developed on Windows hands CRLF to everyone who clones it on Linux or macOS.
+* text=auto
+
+# Always LF in the working tree, on every platform.
+*.py        text eol=lf
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+
+# Windows-only scripts must keep CRLF or cmd/PowerShell can mis-parse them.
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary — never line-ending-converted, never diffed as text.
+*.wav       binary
+*.mp3       binary
+*.flac      binary
+*.npz       binary
+*.onnx      binary
+*.png       binary
+*.jpg       binary
+*.gif       binary
+
+# The demo chart is generated JSON; a diff of it is noise in a review.
+songs/synth-demo/chart.json linguist-generated=true
