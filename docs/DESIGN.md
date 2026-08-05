@@ -499,8 +499,8 @@ juce_add_plugin(VocalTrainer
     IS_MIDI_EFFECT            FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     VST3_CATEGORIES           "Fx" "Analyzer"
-    COPY_PLUGIN_AFTER_BUILD   TRUE
-    VST3_COPY_DIR             "C:/Users/<you>/VST3Dev"   # user-writable — no admin per build
+    COPY_PLUGIN_AFTER_BUILD   ${VT_COPY_PLUGIN_AFTER_BUILD}   # opt-in, default OFF
+    VST3_COPY_DIR             "${VT_VST3_COPY_DIR}"            # default %USERPROFILE%/VST3Dev
     PRODUCT_NAME              "Vocal Trainer")
 
 target_compile_definitions(VocalTrainer PUBLIC
@@ -510,7 +510,7 @@ target_compile_definitions(VocalTrainer PUBLIC
     JUCE_DISPLAY_SPLASH_SCREEN=0)
 ```
 
-- **`VST3_COPY_DIR` to a user folder**, then enable it in Live → Preferences → Plug-Ins → "VST3 Plug-In Custom Folder". Writing to `C:\Program Files\Common Files\VST3` needs admin elevation on every build. Ableton warns the custom folder must not point at the system VST3 folder.
+- **`VST3_COPY_DIR` to a user folder**, then enable it in Live → Preferences → Plug-Ins → "VST3 Plug-In Custom Folder". Writing to `C:\Program Files\Common Files\VST3` needs admin elevation on every build. Ableton warns the custom folder must not point at the system VST3 folder. Both values are driven by cache variables (`VT_COPY_PLUGIN_AFTER_BUILD`, default **OFF**, and `VT_VST3_COPY_DIR`, default `%USERPROFILE%/VST3Dev`) rather than being hardcoded — a fresh clone must not write outside its own build tree, and a path from one developer's machine breaks configure on every other one.
 - **JUCE's `JUCEUtils.cmake` reorders `VST3_CATEGORIES` to force `Fx` first.** This is a JUCE-acknowledged bug (forum thread 62130, staff member `attila`: "removing the reordering entirely is something we'll consider"). Benign here — `Fx` first is exactly what you want for an audio effect.
 - **Turn OFF "Auto-Scale Plug-In Window"** in Live's Preferences. It causes blurry JUCE VST3 editors on Windows above 100% display scaling — a years-old unresolved JUCE/Ableton interaction, still reported against Live 12 on Windows 11 at 125%.
 
