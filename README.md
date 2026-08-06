@@ -1,10 +1,10 @@
 # Vocal Trainer
 
-A Rock Band-style vocal trainer for singers. It shows your sung pitch against the notes of a
+A vocal trainer for singers. It shows your sung pitch against the notes of a
 song, in real time, so you can see *where* you are flat or sharp rather than just being told
 that you are.
 
-![The Standalone practising against a chart: target notes scrolling right to left, with the live sung pitch traced against them](docs/demo.gif)
+![Practising against a chart: target notes scrolling right to left, with the live sung pitch traced against them](docs/demo.gif)
 
 Blue bars are the target notes and the bright one at the now-line is the note due right now.
 The green trace is the live sung pitch, and the faint grey line behind it is the reference
@@ -13,10 +13,10 @@ contour the chart was built from. Bottom left reads out cents, clarity and input
 
 Two halves:
 
-- **The plugin** (C++ / JUCE 9) — a zero-latency audio effect that sits on the mic track.
-  Builds as a **Standalone** app and as a **VST3** for Ableton Live 11. It reads the mic,
+- **The app** (C++ / JUCE 9) — a **standalone** desktop application. It reads the mic,
   runs a hand-rolled MPM / NSDF pitch detector on a 16 kHz analysis stream, and draws a live
-  pitch trace on a note highway.
+  pitch trace on a note highway. It owns the audio device itself; there is no plugin build
+  and nothing here is ever loaded by a host.
 - **The offline pipeline** (Python) — pre-analyses a song into a `chart.json` note chart:
   vocal separation, pitch tracking, note segmentation, lyric alignment, syllabification.
 
@@ -29,7 +29,7 @@ clone that yourself and accept its licence directly, which matters more than it 
 see [Licence](#licence) below and [`THIRD-PARTY.md`](THIRD-PARTY.md).
 
 Contributing a dependency? Read [`LICENSING.md`](LICENSING.md) first. The short version: zero
-copyleft in the plugin binary, and there is a hard do-not-link list.
+copyleft in the shipped binary, and there is a hard do-not-link list.
 
 ---
 
@@ -38,17 +38,18 @@ copyleft in the plugin binary, and there is a hard do-not-link list.
 | | | Status |
 |---|---|---|
 | **M0** | Validate the premise before writing code | done |
-| **M1** | JUCE Standalone: mic in, live pitch out | **built, awaiting a human ear** |
+| **M1** | JUCE app: mic in, live pitch out | done |
 | **M2** | Offline pipeline v1 → `chart.json` | **working end to end** |
-| **M3** | Note highway + full-song practice in the Standalone | **feature-complete, unvalidated by eye** |
+| **M3** | Note highway + full-song practice | **feature-complete** |
 | **M3.5** | Stage 0 separation + **Add song...** from any audio file | **working end to end** |
-| M4 | VST3 target + Ableton sync + calibration | not started |
+| ~~M4~~ | ~~VST3 target + Ableton sync + calibration~~ | **dropped** — standalone only |
 | M5 | Lyrics end to end | not started |
-| M6 | Scoring, post-take review, feedback fading | not started |
+| **M6** | Scoring, post-take review, take recording | **built** |
+| **M6+** | Generated exercises, chart editing, monitor level | **built** |
 
 ---
 
-## Building the plugin (Windows 11, VS Build Tools 2022, no full IDE)
+## Building (Windows 11, VS Build Tools 2022, no full IDE)
 
 **Windows only, currently.** Nothing in the code is Windows-specific by design, but no other
 platform has been built or tested — treat macOS and Linux as unknown rather than supported.
@@ -94,21 +95,31 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Build a single target instead of everything with `--target VocalTrainer_Standalone`,
-`--target VocalTrainer_VST3`, or `--target vt_tests`.
+Build a single target instead of everything with `--target VocalTrainer_Standalone`
+or `--target vt_tests`.
 
 For a Debug build use `-DCMAKE_BUILD_TYPE=Debug` and a separate build directory
 (`build-debug`) — Ninja is single-config, so reusing one directory for both forces a full
 reconfigure each time.
 
-### Running the Standalone
+### Running it
 
 ```
 build\VocalTrainer_artefacts\Release\Standalone\Vocal Trainer.exe
 ```
 
-On first launch, open the Standalone's own **Options → Audio/MIDI Settings** and pick the
-input device and the mic channel. The Standalone owns the audio device; the VST3 does not.
+On first launch, open **Options → Audio/MIDI Settings** and pick the input device and the
+mic channel. The app owns the audio device outright, and the choice is remembered between
+runs.
+
+**The toolbar shows only what applies right now.** With a chart loaded it is one row —
+`Unload | Exercises... | |< Play Levels | Rec Listen Review | ...` — and the free-sing controls
+(**Target**, **Free Sing**) are *gone* rather than greyed out, because a permanently disabled
+control is a permanent question about something that is not available at all. **Levels** opens
+the monitor and guide sliders; they are the widest controls in the app and the thing you touch
+once a session, which is a bad trade for a row of the highway. The **...** menu holds what you
+do between takes: **Add song...**, **Edit chart**, **Edit theme...**. Below about 700 px of
+window width the transport drops onto a second row rather than clipping.
 
 ### Running the tests
 
@@ -117,20 +128,35 @@ build\vt_tests_artefacts\Release\vt_tests.exe
 build\vt_chart_tests_artefacts\Release\vt_chart_tests.exe
 build\vt_render_tests_artefacts\Release\vt_render_tests.exe
 build\vt_backing_tests_artefacts\Release\vt_backing_tests.exe
+build\vt_score_tests_artefacts\Release\vt_score_tests.exe
 ```
 
 `vt_tests` covers the DSP core (12 cases). `vt_chart_tests` covers chart parsing, the
-time queries and octave folding (41 checks) — and it parses the REAL
-`songs/synth-demo/chart.json`, so a schema drift between the Python writer and the C++
-reader fails there rather than on stage. Build a chart first or those checks skip.
-`vt_render_tests` renders components offscreen and counts pixels, which is the only thing
-that catches "it computes correctly but you cannot see it".
+time queries, octave folding, and chart editing round-tripped through the writer
+(66 checks) — and it parses the REAL `songs/synth-demo/chart.json`, so a schema drift
+between the Python writer and the C++ reader fails there rather than on stage. Build a chart
+first or those checks skip. `vt_render_tests` renders components offscreen and counts pixels,
+which is the only thing that catches "it computes correctly but you cannot see it".
+
+`vt_score_tests` covers scoring and exercise generation (70 checks). Two of its cases guard
+bugs that would be **invisible while using the app** and would quietly teach you to sing
+worse:
+
+- **vibrato is not punished.** Textbook vibrato (5.5 Hz, ±50 cents) is perfectly in tune and
+  must score as such. If scoring ever reverts to the instantaneous pitch this fails — and the
+  only symptom in the app would be a stingy score you would blame on your own singing.
+- **the trailing median does not straddle a note boundary.** A median that is not cleared
+  between notes reports a stepwise scale as flat *and* late on every note, which reads
+  exactly like a latency bug and would be debugged in completely the wrong place.
 
 `vt_backing_tests` covers the `BackingPlayer` lifecycle. **It is the one test that crashes
 rather than fails when it catches its bug** — JUCE's resampler takes an integer divide by
 zero if the audio thread pulls it after `releaseResources()`, and a hardware fault cannot be
 turned into a failed assertion. Exit code `0xC0000094` from that runner means the guard in
-`BackingPlayer::renderInto` has been lost. See DESIGN.md §11.12.
+`BackingPlayer::renderInto` has been lost. See DESIGN.md §11.12. It also checks the two
+buffers an exercise generates, because *which deck* each sound lands on is a pedagogical
+decision that fails silently: put the starting reference pitch on the guide deck and the app
+still works, you just lose your starting note the first time you turn the guide off.
 
 Python side:
 
@@ -142,19 +168,17 @@ Disable the C++ test targets entirely with `-DVT_BUILD_TESTS=OFF`.
 
 ### Adding a song from an audio file (M3.5)
 
-Click **Add song...**, pick any audio file, and wait. The plugin runs the whole
+Click **Add song...**, pick any audio file, and wait. The app runs the whole
 offline pipeline for you — vocal/instrumental separation, pitch tracking, note
 segmentation, lyric transcription — then loads the finished chart.
 
 A progress panel covers the highway with the current stage and an overall
-percentage; **Cancel** stops it cleanly at the next stage boundary. Roughly 3–5
-minutes for a 4-minute song on this machine's RTX 3080 Ti (the first ever run
+percentage; **Cancel** stops it cleanly at the next stage boundary. (the first ever run
 also downloads a 610 MB separation model).
 
-The button is **Standalone-only** and deliberately so. Separation is minutes of
-GPU work, and starting it from inside Live — which owns the audio device and
-expects prompt returns — would make Live look hung. Preparing songs is a
-before-you-play activity.
+Separation is minutes of GPU work, so it runs out-of-process and cannot stall the
+audio callback. Preparing songs is a before-you-play activity, which is why the
+button lives in the **...** menu rather than on the transport row.
 
 Video containers (`.mp4`, `.mkv`, …) work too; ffmpeg demuxes them first.
 
@@ -169,7 +193,7 @@ difference available in the whole pipeline: known lyrics turn a 20–38% word
 error transcription problem into a pure timing problem. Without it the chart
 still gets words, but they will be wrong often enough to notice.
 
-### Practising against a chart (M3)
+### Practicing against a chart (M3)
 
 1. Build a chart for a song — **Add song...**, `add-song`, or `import-stems`.
 2. Launch the Standalone, click **Load chart...**, pick `songs/<id>/chart.json`.
@@ -178,19 +202,18 @@ still gets words, but they will be wrong often enough to notice.
 
 Try it immediately with the bundled demo: `songs/synth-demo/chart.json`.
 
-**Wear headphones.** If you practise on speakers, the mic hears the backing track and the
+**Wear headphones.** If you practice on speakers, the mic hears the backing track and the
 tracker follows the record instead of you. That is the single most likely cause of
 "the pitch detection is broken" that is not actually a bug.
 
 **The clock follows what you hear.** When a backing track is loaded, its playback position
 *is* chart time. With no backing track the clock falls back to the audio-stream position —
 estimates arrive at a steady 125 Hz even during silence, so the stream is drift-free and is
-already the timebase those estimates are stamped in. Either way the highway can never drift
+already the time base those estimates are stamped in. Either way the highway can never drift
 against the audio.
 
-Backing playback is **Standalone only**. In the VST3, Ableton owns playback, and a plugin
-that also played the backing track would double it. The mix happens strictly *after* the
-analysis chain reads the mic, so the backing track can never leak into the pitch detector.
+The backing mix happens strictly *after* the analysis chain reads the mic, so the backing
+track can never leak into the pitch detector.
 
 Two things the highway does deliberately, which can look like bugs:
 
@@ -205,39 +228,100 @@ Two things the highway does deliberately, which can look like bugs:
 Every geometry and colour constant lives in `%APPDATA%\VocalTrainer\theme.json` and
 hot-reloads within 250 ms — no rebuild needed to tune the look.
 
-### Loading the VST3 in Ableton Live 11
+**Load chart... opens in your song folder** with no path configured anywhere. It resolves,
+in order: the folder you last loaded a chart from, then the repo's own `songs/` directory
+found by walking up from the executable, then `%APPDATA%\VocalTrainer\songs`. That mirrors
+`_default_library()` in the Python CLI, so the tool that *writes* a song and the app that
+*reads* it agree on where songs live without either naming a path. It is remembered in
+`%APPDATA%\VocalTrainer\VocalTrainer.settings` — never in serialised session state, because
+an absolute path baked into a saved session breaks permanently the day the library moves.
 
-Configure with `-DVT_COPY_PLUGIN_AFTER_BUILD=ON` and the built VST3 is copied to
-`VT_VST3_COPY_DIR` after every build. That defaults to `%USERPROFILE%\VST3Dev` — a
-user-writable folder, so builds never need admin elevation, unlike
-`C:\Program Files\Common Files\VST3`. Override it with `-DVT_VST3_COPY_DIR=...`.
+### Warm-ups: scales, arpeggios and interval drills
 
-```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVT_COPY_PLUGIN_AFTER_BUILD=ON
-```
+Click **Exercises...** and pick one. Ten of them, from long tones to the full twelve-interval
+drill, with a starting note, a tempo and a **length** in the same menu. They are *generated as
+charts*, so the highway, the lyric strip (solfège syllables), the scoring and the review all
+work on a warm-up exactly as they do on a song — and the numbers are comparable between the two.
 
-Point Live at that same folder once: **Preferences → Plug-Ins → VST3 Plug-In Custom Folder**,
-then **Rescan**. Live requires that this custom folder is *not* the system VST3 folder.
+**It starts by playing you your note.** A piano tone at the first pitch of the exercise rings
+on its own, then four count-in clicks, then you sing — which is what a teacher does before
+counting you in. That reference is on the *click* deck, not the guide deck, so turning **Guide**
+off to test your own ear does not also take away the note you are supposed to start on.
 
-Also turn **OFF** Live's **"Auto-Scale Plug-In Window"**. It makes JUCE VST3 editors blurry
-on Windows above 100% display scaling — a long-standing unresolved JUCE/Ableton interaction.
+The running guide — one struck piano note per note of the exercise — is on the guide deck, and
+**Guide** and its level silence it. Silencing it is the point: a reference you cannot turn off
+trains you to follow rather than to pitch. Notes longer than the tone's decay are re-struck
+every three beats, as an accompanist would, so a long tone still has something to check against
+in the last bar where it is hardest to hold steady.
 
-The plugin must go on an **audio track** carrying the mic signal, as an audio effect.
+**Length is a duration, not a repeat count** — Short (0:45), Medium (1:45) or Long (3:30),
+remembered between sessions. One "repeat" means five seconds of a five-note run and the better
+part of a minute of the interval drill, so a repeat count would make some exercises trivial and
+others interminable; the tempo changes the answer too. Whichever length you pick, an exercise
+never does less than one whole pass of itself.
 
----
+Exercises that transpose walk **up to a turning point and back down** rather than climbing a
+semitone per repetition forever, bounded by your range, an octave of climb, and half the
+repetitions. Ninety seconds of five-note runs is twenty-odd repetitions, and climbing all of
+them would leave the top of the exercise three octaves above where it started. Each repetition
+is named after the key it is in (*"Run 9 (F4)"*), so the review's worst-phrase list tells you
+where in your range the wheels come off.
+
+The interval drill is the one worth doing regularly — the review groups your errors by the
+interval you leapt into, so it ends with something as specific as *"weakest interval:
+ascending 6th, −34 cents over 4 attempts"*.
+
+### After the take: recolouring, review, and listening back
+
+- **Notes recolour once they have been sung**, green through vermilion by accuracy, with the
+  part you actually sang filled solid — so a note sung well but cut short reads differently
+  from one sung badly, and differently again from one never sung (hollow grey). Notes are
+  never recoloured *while* they are active: during the note the geometry (trace inside the
+  bar) is the signal, and a bar changing colour under the dot would compete with it. Set
+  `highway.showScoredNotes` to `false` in `theme.json` to switch it off.
+- **Rec** records the mic to `songs/<id>/takes/take-<stamp>.wav` and starts the song. It
+  records the same mono sum the detector analysed, before monitoring and the backing track,
+  so the take is exactly the signal the score came from. **Listen** plays it back against the
+  backing track; scoring is suspended while it does.
+- **Review** appears automatically when the song ends. It leads with the one most actionable
+  thing — a systematic *"you sat consistently 22 cents flat"* is a single habit to fix, where
+  a percentage is a scoreboard — then a cents-error histogram, the weakest phrases worst-first
+  (click one to loop it), and the interval breakdown. No score number, no grade, no streak:
+  DESIGN.md §6 is explicit that the live view carries none of that, and moving it to the
+  review screen would only relocate the gamification.
+
+### Fixing a chart by hand
+
+ASR sits around 30% word error on sung vocals and the note segmenter targets an F-measure of
+0.70, so charts come out wrong sometimes. Tick **Edit chart** in the **...** menu, click a note
+on the highway, and fix the three things automatic charting actually gets wrong:
+
+- **a wrong word** — retype it, or retype the whole **Line** and press Return to re-flow it
+  one word per note across the phrase. That is the fast path: the timing is already right,
+  it is only the words that are wrong.
+- **a note an octave out** — the dominant segmenter failure, so `-12` / `+12` get their own
+  buttons.
+- **a note slightly early, late or long** — 10 ms and 25 ms nudges, clamped so notes can
+  never be made to overlap.
+
+**Save chart** writes back to `chart.json`, keeping the previous version as `chart.json.bak`.
+It re-reads the file and merges, so every field this build does not parse — `$schema`, the
+`timing` block, `referenceAudioSha1`, the generator metadata, and the whole contour — survives
+untouched. Correcting one word must not silently delete the metadata the offline pipeline
+depends on. Editing lyrics also flips `lyricSource` to `manual`, which removes the
+"auto-transcribed" badge, because once a human has checked the words leaving it up is its own
+kind of lie.
 
 ## Build options
 
 | Option | Default | Effect |
 |---|---|---|
-| `VT_ENABLE_ASIO` | **OFF** | When ON, sets `JUCE_ASIO=1` and compiles ASIO support into the Standalone. **Do not distribute a binary built with this ON** — see below. |
+| `VT_ENABLE_ASIO` | **OFF** | When ON, sets `JUCE_ASIO=1` and compiles ASIO support into the app. **Do not distribute a binary built with this ON** — see below. |
 | `VT_BUILD_TESTS` | ON | Builds the console test runners. |
-| `VT_COPY_PLUGIN_AFTER_BUILD` | OFF | When ON, copies the built VST3 into `VT_VST3_COPY_DIR` after each build. |
-| `VT_VST3_COPY_DIR` | `%USERPROFILE%\VST3Dev` | Where that copy goes. Must be user-writable, and must not be the system VST3 folder. |
 
 ### About `VT_ENABLE_ASIO`
 
-Turning it **ON** gives the **Standalone** direct low-latency access to the Apollo Twin X
+Turning it **ON** gives the app direct low-latency access to the Apollo Twin X
 through its ASIO driver, instead of going through WASAPI. That is a real, audible improvement
 for live monitoring, and it is the reason the option exists. The ASIO SDK is bundled with
 JUCE 9 (since 8.0.11), so nothing needs to be downloaded — just reconfigure with
@@ -252,10 +336,8 @@ It defaults to **OFF** for two reasons:
    **for any closed-source distribution it must stay OFF** (JUCE falls back to WASAPI), or
    you must obtain Steinberg's proprietary ASIO licence. See `LICENSING.md`.
 
-**The VST3 target never needs ASIO** — inside Live, Live owns the audio device.
-
 If you enable ASIO, note the startup order that this rig needs: Apollo powered and its
-console running *before* Live or the Standalone.
+console running *before* the app.
 
 ---
 
@@ -340,21 +422,33 @@ else.
 ## Repository layout
 
 ```
-CMakeLists.txt        build configuration for the plugin + tests
+CMakeLists.txt        build configuration for the app + tests
 docs/DESIGN.md        the full design document — the source of truth for all numbers
 LICENSE               MIT — this project's own source
 THIRD-PARTY.md        attribution for everything we depend on, and what you may redistribute
 LICENSING.md          licence decisions and the do-not-link list (read before adding a dep)
 songs/synth-demo/     the one bundled song — synthesised, no third-party rights
-src/                  C++ plugin source (namespace vt)
-  PluginProcessor.cpp   audio thread, transport, lock-free queues
-  PluginEditor.cpp      editor shell
+src/                  C++ app source (namespace vt)
+  AudioEngine.cpp       audio thread, lock-free queues, monitor + backing mix
+  MainComponent.cpp     the UI shell
+  app/AppSettings.cpp   PropertiesFile: song library root, remembered folders, monitor level
+  audio/BackingPlayer.cpp  three decks: backing, guide vocal, recorded take
+  audio/TakeRecorder.cpp   mic -> WAV, lock-free from the audio thread
+  chart/Chart.cpp       the parsed chart, plus the narrow hand-editing API
+  chart/ChartWriter.cpp save an edited chart without losing unparsed fields
   dsp/AnalysisChain.cpp resample, condition, MPM pitch detection
+  exercise/ExerciseLibrary.cpp  scales and interval drills, generated as charts
+  exercise/ExerciseAudio.cpp    their metronome click and pitch guide tone
+  score/TakeScorer.cpp  per-note scoring off a trailing median, and the take summary
   import/SongImporter.cpp  spawns the offline pipeline, parses its progress
   ui/Theme.cpp          Okabe-Ito colours, fonts, metrics
   ui/PitchLaneComponent.cpp   the pitch lane / live trace
+  ui/NoteHighwayComponent.cpp the scrolling highway, incl. accuracy recolouring
   ui/ImportOverlayComponent.cpp  the "preparing your song" panel
+  ui/ReviewOverlayComponent.cpp  the post-take review screen
+  ui/ChartEditPanelComponent.cpp fix a word, a pitch or a timing by hand
 tests/test_pitch.cpp  pitch detector tests (vt_tests console app)
+tests/test_score.cpp  scoring + exercise generation (vt_score_tests)
 JUCE/                 JUCE 9.0.0 clone — gitignored, not a submodule
 .venv/                Python 3.11 venv for the offline pipeline — gitignored
 .venv-separate/       Python 3.11 venv holding torch + audio-separator — gitignored

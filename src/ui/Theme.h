@@ -16,7 +16,7 @@
 
     Polling with a juce::Timer is correct in this one place: Theme lives entirely
     on the message thread. (The audio thread and the analysis worker never touch
-    it; values they need are bridged through atomics on the processor.)
+    it; values they need are bridged through atomics on the engine.)
 
     Missing or malformed keys fall back to the compiled-in defaults, silently and
     without throwing. A theme.json that fails to parse leaves the previous values
@@ -57,9 +57,33 @@ struct ThemeValues
     juce::Colour textDim           { 0xff8a8a96 };
     juce::Colour nowLine           { 0xff5a5a68 };
 
+    //== Scored notes (M6) ====================================================
+    /** A note that has been sung is recoloured by how accurately, on an Oklab
+        ramp between these two. They default to the SAME pair as the live trace,
+        deliberately: green means the same thing whether it is under the dot now
+        or behind the now-line afterwards, and two different greens for "in tune"
+        would be a third state the singer has to learn. */
+    juce::Colour noteScoredGood    { 0xff009e73 };
+    juce::Colour noteScoredPoor    { 0xffd55e00 };
+
+    /** A note that went past unsung. Distinct from "sung badly": claiming the
+        singer missed a note they never reached is how feedback loses its
+        credibility. */
+    juce::Colour noteNotSung       { 0xff4a4a56 };
+
+    /** Outline of the note selected in the chart editor. */
+    juce::Colour editSelection     { 0xfff0e442 };
+
     //== Lane geometry ========================================================
     int   headerHeight            = 32;
     int   controlsHeight          = 34;
+
+    /** Second controls row, shown only in chart mode. The transport, the two
+        monitoring levels, recording and review do not fit on one row at the
+        640 px minimum width, and a row of controls that overlap each other is
+        worse than a row that only appears when it is relevant. */
+    int   controlsRow2Height      = 32;
+
     int   footerHeight            = 28;
 
     /** Vertical span of the lane, in semitones. DESIGN.md: minimum 12. */
@@ -114,6 +138,17 @@ struct ThemeValues
     /** Alpha of the reference singer's ghost contour. DESIGN.md §7: 25%. */
     float ghostContourAlpha       = 0.25f;
     float ghostContourThicknessPx = 1.0f;
+
+    /** Alpha of a note bar once it has been sung and recoloured by accuracy.
+        Higher than upcomingBarAlpha so the result of a phrase stays legible as
+        it scrolls away, which is what makes glancing back at it useful. */
+    float scoredBarAlpha          = 0.85f;
+
+    /** Set false to switch the accuracy recolouring off entirely. It is a real
+        preference, not just a debug switch: DESIGN.md section 6 warns that
+        always-on feedback breeds dependency, and a singer working on their own
+        ear may deliberately not want to see the result of each note land. */
+    bool  showScoredNotes         = true;
 
     //== Trace ================================================================
     /** Length of the unsmoothed trail, milliseconds. DESIGN.md: 500. */

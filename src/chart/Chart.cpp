@@ -261,7 +261,10 @@ std::unique_ptr<Chart> Chart::loadFrom (const juce::File& chartJson, juce::Strin
     auto chart = parse (parsed, error);
 
     if (chart != nullptr)
+    {
         chart->baseDirectory = chartJson.getParentDirectory();
+        chart->sourceFile    = chartJson;
+    }
 
     return chart;
 }
@@ -390,6 +393,309 @@ const ChartNote* Chart::noteById (int id) const noexcept
             return &n;
 
     return nullptr;
+}
+
+int Chart::indexForId (int id) const noexcept
+{
+    for (size_t i = 0; i < notes.size(); ++i)
+        if (notes[i].id == id)
+            return (int) i;
+
+    return -1;
+}
+
+//==============================================================================
+// Editing — message thread only. See the MUTATION note in Chart.h.
+//==============================================================================
+namespace
+{
+    /** Smallest note this build will produce. Below this the highway draws a
+        bar narrower than its own border and the syllable wipe divides by
+        something indistinguishable from zero. */
+    constexpr double kMinNoteSeconds = 0.05;
+
+    /** Kept clear between adjacent notes so they stay visibly separate and so
+        TakeScorer's note-boundary median clear has an unambiguous edge. */
+    constexpr double kMinNoteGapSeconds = 0.01;
+}
+
+void Chart::refreshAfterEdit()
+{
+    std::sort (notes.begin(), notes.end(),
+               [] (const ChartNote& a, const ChartNote& b)
+               { return a.startSeconds < b.startSeconds; });
+
+    lyricNoteCount = 0;
+
+    for (const auto& n : notes)
+        if (n.syllable.isNotEmpty())
+            ++lyricNoteCount;
+
+    if (! notes.empty())
+    {
+        lowestMidi = highestMidi = notes.front().midi;
+
+        for (const auto& n : notes)
+        {
+            lowestMidi  = std::min (lowestMidi,  n.midi);
+            highestMidi = std::max (highestMidi, n.midi);
+        }
+
+        // Never SHRINK the duration on an edit: a chart's duration also decides
+        // how far the backing track is expected to run, and quietly cropping it
+        // because the last note was shortened would cut the song's outro off.
+        durationSeconds = std::max (durationSeconds, notes.back().endSeconds() + 2.0);
+    }
+
+    modified = true;
+}
+
+bool Chart::setNoteSyllable (int index, const juce::String& syllable)
+{
+    if (index < 0 || index >= (int) notes.size())
+        return false;
+
+    notes[(size_t) index].syllable = syllable.trim();
+
+    // A note that now has text but no role would render as a bare syllable with
+    // no word grouping; treat a hand-typed syllable as the start of a word,
+    // which is what it almost always is.
+    if (notes[(size_t) index].syllable.isNotEmpty()
+        && notes[(size_t) index].syllableRole == SyllableRole::none)
+        notes[(size_t) index].syllableRole = SyllableRole::wordStart;
+
+    refreshAfterEdit();
+    return true;
+}
+
+bool Chart::setNoteMidi (int index, int midi)
+{
+    if (index < 0 || index >= (int) notes.size())
+        return false;
+
+    notes[(size_t) index].midi = juce::jlimit (0, 127, midi);
+
+    // The reference singer's deviation belonged to the OLD pitch. Carrying it
+    // over would leave a hand-corrected note deliberately 40 cents off the note
+    // the user just chose, and the target bar would not sit where they put it.
+    notes[(size_t) index].centsOffset = 0.0f;
+
+    refreshAfterEdit();
+    return true;
+}
+
+bool Chart::setNoteTiming (int index, double startSeconds, double durationSeconds_)
+{
+    if (index < 0 || index >= (int) notes.size())
+        return false;
+
+    // Clamp against the neighbours rather than rejecting the edit: dragging a
+    // note into its neighbour is a perfectly reasonable gesture, and the useful
+    // response is to stop it at the boundary, not to do nothing.
+    const auto lowerBound = index > 0
+                              ? notes[(size_t) (index - 1)].endSeconds() + kMinNoteGapSeconds
+                              : 0.0;
+
+    const auto upperBound = (index + 1) < (int) notes.size()
+                              ? notes[(size_t) (index + 1)].startSeconds - kMinNoteGapSeconds
+                              : std::numeric_limits<double>::max();
+
+    auto start = std::max (lowerBound, startSeconds);
+    auto duration = std::max (kMinNoteSeconds, durationSeconds_);
+
+    // If the note no longer fits before the next one, shorten it rather than
+    // pushing the next one along — a timing fix must never cascade through the
+    // rest of the song.
+    if (start + duration > upperBound)
+    {
+        if (upperBound - start >= kMinNoteSeconds)
+        {
+            duration = upperBound - start;
+        }
+        else
+        {
+            start = std::max (lowerBound, upperBound - kMinNoteSeconds);
+            duration = std::max (kMinNoteSeconds, upperBound - start);
+        }
+    }
+
+    notes[(size_t) index].startSeconds    = start;
+    notes[(size_t) index].durationSeconds = duration;
+
+    refreshAfterEdit();
+    return true;
+}
+
+bool Chart::setNoteType (int index, NoteType type)
+{
+    if (index < 0 || index >= (int) notes.size())
+        return false;
+
+    notes[(size_t) index].type = type;
+    refreshAfterEdit();
+    return true;
+}
+
+bool Chart::removeNote (int index)
+{
+    if (index < 0 || index >= (int) notes.size())
+        return false;
+
+    // Never delete the last note. Chart::parse() refuses a chart with no notes,
+    // so a chart edited down to nothing could be saved but never loaded again —
+    // an edit that destroys the file it is editing.
+    if (notes.size() <= 1)
+        return false;
+
+    notes.erase (notes.begin() + index);
+    refreshAfterEdit();
+    return true;
+}
+
+int Chart::insertNote (double startSeconds, double durationSeconds_, int midi,
+                       const juce::String& syllable)
+{
+    auto start = std::max (0.0, startSeconds);
+    auto duration = std::max (kMinNoteSeconds, durationSeconds_);
+
+    // Find the gap this lands in and fit inside it.
+    for (const auto& n : notes)
+    {
+        if (start < n.endSeconds() && (start + duration) > n.startSeconds)
+        {
+            if (start < n.startSeconds)
+            {
+                duration = n.startSeconds - kMinNoteGapSeconds - start;
+            }
+            else
+            {
+                start = n.endSeconds() + kMinNoteGapSeconds;
+                duration = std::max (kMinNoteSeconds, duration);
+            }
+        }
+    }
+
+    if (duration < kMinNoteSeconds)
+        return -1;
+
+    // Re-check: moving the start may have walked into the NEXT note.
+    for (const auto& n : notes)
+        if (start < n.endSeconds() && (start + duration) > n.startSeconds)
+            return -1;
+
+    int nextId = 0;
+
+    for (const auto& n : notes)
+        nextId = std::max (nextId, n.id + 1);
+
+    ChartNote note;
+    note.id              = nextId;
+    note.startSeconds    = start;
+    note.durationSeconds = duration;
+    note.midi            = juce::jlimit (0, 127, midi);
+    note.type            = NoteType::normal;
+    note.syllable        = syllable.trim();
+    note.syllableRole    = note.syllable.isNotEmpty() ? SyllableRole::wordStart
+                                                      : SyllableRole::none;
+    note.confidence      = 1.0f;
+
+    // Inherit the phrase of whatever it was inserted into, so a hand-added note
+    // is included in that phrase's score rather than floating outside every one.
+    note.phraseId = -1;
+
+    for (size_t i = 0; i < phrases.size(); ++i)
+        if (start >= phrases[i].startSeconds && start < phrases[i].endSeconds)
+        {
+            note.phraseId = phrases[i].id;
+            phrases[i].noteIds.push_back (note.id);
+            break;
+        }
+
+    notes.push_back (std::move (note));
+    refreshAfterEdit();
+    return nextId;
+}
+
+void Chart::markLyricsManual()
+{
+    lyricSource = "manual";
+    modified = true;
+}
+
+bool Chart::setPhraseText (int phraseIndex, const juce::String& text)
+{
+    if (phraseIndex < 0 || phraseIndex >= (int) phrases.size())
+        return false;
+
+    auto& phrase = phrases[(size_t) phraseIndex];
+
+    // Collect the phrase's notes IN TIME ORDER. noteIds is written by the
+    // pipeline and is not guaranteed sorted, and re-flowing words onto notes in
+    // the wrong order would scramble the line being fixed.
+    std::vector<int> indices;
+
+    if (! phrase.noteIds.empty())
+    {
+        for (const auto id : phrase.noteIds)
+            if (const auto idx = indexForId (id); idx >= 0)
+                indices.push_back (idx);
+    }
+    else
+    {
+        int first = 0, last = 0;
+
+        if (notesOverlapping (phrase.startSeconds, phrase.endSeconds, first, last))
+            for (int i = first; i < last; ++i)
+                indices.push_back (i);
+    }
+
+    std::sort (indices.begin(), indices.end(),
+               [this] (int a, int b)
+               { return notes[(size_t) a].startSeconds < notes[(size_t) b].startSeconds; });
+
+    if (indices.empty())
+        return false;
+
+    auto tokens = juce::StringArray::fromTokens (text.trim(), " \t\r\n", "");
+    tokens.removeEmptyStrings();
+
+    for (size_t i = 0; i < indices.size(); ++i)
+    {
+        auto& note = notes[(size_t) indices[i]];
+
+        if (i < (size_t) tokens.size())
+        {
+            // Last note takes any surplus, so nothing the user typed is thrown
+            // away without them seeing where it went.
+            const bool isLast = (i + 1) == indices.size();
+
+            if (isLast && tokens.size() > (int) indices.size())
+            {
+                juce::StringArray rest;
+
+                for (int t = (int) i; t < tokens.size(); ++t)
+                    rest.add (tokens[t]);
+
+                note.syllable = rest.joinIntoString (" ");
+            }
+            else
+            {
+                note.syllable = tokens[(int) i];
+            }
+
+            note.syllableRole = SyllableRole::wordStart;
+        }
+        else
+        {
+            note.syllable = {};
+        }
+    }
+
+    phrase.text = text.trim();
+
+    markLyricsManual();
+    refreshAfterEdit();
+    return true;
 }
 
 } // namespace vt

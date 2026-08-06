@@ -10,9 +10,9 @@
                      been running since the audio device opened, so it can be
                      thousands of seconds while a song is 5 seconds in.
 
-      CHART time   — position in the song. Driven by the backing track (or, from
-                     M4, by Ableton's transport). Starts at 0, pauses, seeks,
-                     and has no relationship to stream time whatsoever.
+      CHART time   — position in the song. Driven by the backing track. Starts
+                     at 0, pauses, seeks, and has no relationship to stream time
+                     whatsoever.
 
     Mixing them up is not a hypothetical. Chart mode originally stored chart
     time in the live samples while the now-line ran on the backing track's

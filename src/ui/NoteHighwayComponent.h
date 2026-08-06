@@ -35,10 +35,13 @@
 #include <limits>
 #include <vector>
 
+#include <functional>
+
 #include "Theme.h"
 #include "../chart/Chart.h"
 #include "../chart/PitchMath.h"
 #include "../chart/TimelineMap.h"
+#include "../score/TakeScorer.h"
 
 namespace vt
 {
@@ -83,6 +86,34 @@ public:
     void setChart (const Chart* newChart);
     const Chart* getChart() const noexcept { return chart; }
 
+    /** Non-owning source of per-note results, used to recolour notes that have
+        already gone past. Pass nullptr to switch the recolouring off.
+
+        THE NOTE IS RECOLOURED ONLY ONCE IT HAS FINISHED, never while it is
+        being sung. During the note the primary signal is GEOMETRY — the trace
+        inside the bar — exactly as DESIGN.md section 7 specifies, and a bar that
+        changed colour under the dot would compete with it for attention and
+        would flicker as the running average moved. Afterwards the geometry has
+        scrolled into history and the colour is all that is left, so that is when
+        it earns its place. */
+    void setScorer (const TakeScorer* newScorer) noexcept { scorer = newScorer; }
+
+    //== Chart editing ========================================================
+    /** In edit mode the highway accepts mouse clicks and reports which note was
+        clicked. Off by default: the highway is something you sing at, and a
+        stray click on it during a take must do nothing at all. */
+    void setEditMode (bool shouldEdit);
+    bool isEditMode() const noexcept { return editMode; }
+
+    /** Draws a bright outline around this note id. -1 for none. */
+    void setSelectedNoteId (int noteId) noexcept;
+
+    /** Note id of whatever was clicked, or -1 for empty space. Only fires in
+        edit mode. */
+    std::function<void (int)> onNoteClicked;
+
+    void mouseDown (const juce::MouseEvent&) override;
+
     void pushSample (const Sample& s) noexcept;
     void clearHistory() noexcept;
 
@@ -124,7 +155,7 @@ public:
     Readout getReadout() const noexcept { return readout; }
 
     /** MIDI note the singer should currently be aiming at, or -1. The editor
-        publishes this to the processor to constrain the detector's search. */
+        publishes this to the engine to constrain the detector's search. */
     int getTargetMidi() const noexcept { return readout.targetMidi; }
 
     void applyTheme();
@@ -168,6 +199,19 @@ private:
     float yForMidi (float midi) const noexcept;
     float xForTime (double t) const noexcept;
 
+    /** Inverse of xForTime / yForMidi, for hit-testing a click. */
+    double timeForX (float x) const noexcept;
+    float  midiForY (float y) const noexcept;
+
+    /** Index of the visible note nearest to a point, or -1 when the click is
+        nowhere near one. Nearest-rectangle rather than strict containment: a
+        note bar is only ~20 px tall, and requiring a hit inside it would make
+        selecting one an exercise in precision for no reason. */
+    int noteIndexNear (juce::Point<float>) const noexcept;
+
+    /** The colour a finished note should be drawn in, from its score. */
+    juce::Colour scoredColourFor (const NoteScore&) const noexcept;
+
     void updateZoomTarget() noexcept;
     void updateReadout() noexcept;
     void refreshBackgroundIfNeeded();
@@ -175,10 +219,15 @@ private:
     void paintGhostContour (juce::Graphics&, juce::Rectangle<float> area);
     void paintNotes (juce::Graphics&, juce::Rectangle<float> area);
     void paintTrace (juce::Graphics&, juce::Rectangle<float> area);
+    void paintSelection (juce::Graphics&, float x0, float cy, float w, float haloHeight);
 
     //==========================================================================
     Theme& theme;
     const Chart* chart = nullptr;
+    const TakeScorer* scorer = nullptr;
+
+    bool editMode = false;
+    int  selectedNoteId = -1;
 
     BackgroundLayer background { *this };
 

@@ -10,7 +10,7 @@
     the identical binary, the fault was:
 
         WASAPIAudioIODevice::run
-          -> VocalTrainerProcessor::processBlock
+          -> AudioEngine::processBlock
           -> BackingPlayer::renderInto
           -> AudioTransportSource::getNextAudioBlock
           -> ResamplingAudioSource::getNextAudioBlock + 0x14d   <-- idiv r12d
@@ -40,6 +40,7 @@
 #include <iostream>
 
 #include "audio/BackingPlayer.h"
+#include "exercise/ExerciseAudio.h"
 
 namespace
 {
@@ -228,6 +229,133 @@ int main()
         player.renderInto (block);
         check (block.getMagnitude (0, kBlockSize) == 0.0f,
                "backing: released reference transport is silent, not fatal");
+    }
+
+    //==========================================================================
+    // The two buffers a generated exercise plays. Rendering them is pure
+    // arithmetic, but WHICH DECK each sound lands on is a pedagogical decision
+    // that is invisible from the code that plays them — and getting it wrong is
+    // silent: the app still works, the singer just loses their starting note the
+    // first time they turn the guide off to test their ear.
+    //==========================================================================
+    {
+        const auto spec = vt::ExerciseLibrary::makeDefaultSpec (vt::ExerciseSpec::Kind::majorScale,
+                                                                60, 72);
+        juce::String error;
+        auto chart = vt::ExerciseLibrary::buildChart (spec, error);
+
+        check (chart != nullptr, "exercise audio: the chart builds", error);
+
+        if (chart != nullptr)
+        {
+            const auto click = vt::ExerciseAudio::renderClickTrack (*chart, spec, kDeviceRate);
+            const auto guide = vt::ExerciseAudio::renderGuideTone (*chart, spec, kDeviceRate);
+
+            const auto rangeMagnitude = [kDeviceRate = kDeviceRate] (const juce::AudioBuffer<float>& b,
+                                                                     double fromSeconds, double toSeconds)
+            {
+                const auto from = juce::jlimit (0, b.getNumSamples(),
+                                                (int) (fromSeconds * kDeviceRate));
+                const auto to   = juce::jlimit (from, b.getNumSamples(),
+                                                (int) (toSeconds * kDeviceRate));
+
+                return to > from ? b.getMagnitude (from, to - from) : 0.0f;
+            };
+
+            const auto reference = vt::ExerciseLibrary::referencePitchSeconds (spec);
+            const auto leadIn    = vt::ExerciseLibrary::leadInSeconds (spec);
+
+            check (click.getNumSamples() > 0 && guide.getNumSamples() > 0,
+                   "exercise audio: both decks rendered",
+                   juce::String (click.getNumSamples() / kDeviceRate, 1) + " s");
+
+            // The starting pitch is on the CLICK deck, so silencing the guide
+            // does not silence it.
+            check (rangeMagnitude (click, 0.0, reference) > 0.05f,
+                   "exercise audio: the reference pitch is on the click deck",
+                   juce::String (rangeMagnitude (click, 0.0, reference), 3));
+
+            check (rangeMagnitude (guide, 0.0, leadIn) == 0.0f,
+                   "exercise audio: the guide deck is silent through the lead-in",
+                   juce::String (rangeMagnitude (guide, 0.0, leadIn), 3));
+
+            // And it rings ALONE: a tick over the strike is the one moment the
+            // singer is listening hardest to the pitch.
+            check (rangeMagnitude (click, 0.001, reference - 0.05) > 0.0f
+                     && rangeMagnitude (click, reference, reference + 0.05) > 0.05f,
+                   "exercise audio: count-in clicks start after the reference pitch");
+
+            check (rangeMagnitude (guide, leadIn, leadIn + 0.5) > 0.05f,
+                   "exercise audio: the guide strikes the first note on time",
+                   juce::String (rangeMagnitude (guide, leadIn, leadIn + 0.5), 3));
+
+            // A piano note DECAYS. If this ever came back equal, the tone has
+            // silently gone back to being a steady drone.
+            const auto atStrike = rangeMagnitude (guide, leadIn, leadIn + 0.10);
+            const auto later    = rangeMagnitude (guide, leadIn + 0.45, leadIn + 0.55);
+
+            check (later < atStrike * 0.9f && later > 0.0f,
+                   "exercise audio: the guide tone decays like a struck string",
+                   juce::String (atStrike, 3) + " -> " + juce::String (later, 3));
+
+            check (click.getMagnitude (0, click.getNumSamples()) <= 1.0f
+                     && guide.getMagnitude (0, guide.getNumSamples()) <= 1.0f,
+                   "exercise audio: neither deck clips",
+                   juce::String (juce::jmax (click.getMagnitude (0, click.getNumSamples()),
+                                             guide.getMagnitude (0, guide.getNumSamples())), 3));
+
+            //------------------------------------------------------------------
+            // Rendering happens on the MESSAGE THREAD, in the handler for a menu
+            // item, so it has to be fast enough not to read as the app hanging.
+            // The bound is deliberately generous — it is wall clock on unknown
+            // hardware — because what it guards is the ORDER OF MAGNITUDE:
+            // twelve partials over three and a half minutes is ~10^8 samples,
+            // and going back to a std::sin per partial per sample lands a long
+            // way the wrong side of this.
+            //------------------------------------------------------------------
+            {
+                const auto longest = vt::ExerciseLibrary::makeDefaultSpec (
+                                         vt::ExerciseSpec::Kind::majorScale, 60, 72,
+                                         vt::ExerciseLibrary::kLongSeconds);
+
+                if (auto longest_chart = vt::ExerciseLibrary::buildChart (longest, error))
+                {
+                    const auto startMs = juce::Time::getMillisecondCounterHiRes();
+
+                    const auto clickTrack = vt::ExerciseAudio::renderClickTrack (*longest_chart, longest, kDeviceRate);
+                    const auto guideTrack = vt::ExerciseAudio::renderGuideTone (*longest_chart, longest, kDeviceRate);
+
+                    const auto elapsedMs = juce::Time::getMillisecondCounterHiRes() - startMs;
+
+                    check (elapsedMs < 2000.0 && clickTrack.getNumSamples() > 0
+                             && guideTrack.getNumSamples() > 0,
+                           "exercise audio: the longest exercise renders without a visible freeze",
+                           juce::String (elapsedMs, 0) + " ms for "
+                             + juce::String (guideTrack.getNumSamples() / kDeviceRate, 0) + " s");
+                }
+            }
+
+            // Long tones are re-struck, or the reference is gone by the time the
+            // note gets hard to hold.
+            auto longSpec = vt::ExerciseLibrary::makeDefaultSpec (vt::ExerciseSpec::Kind::sustainedTone,
+                                                                  60, 72);
+            auto longChart = vt::ExerciseLibrary::buildChart (longSpec, error);
+
+            if (longChart != nullptr && ! longChart->getNotes().empty())
+            {
+                const auto tones = vt::ExerciseAudio::renderGuideTone (*longChart, longSpec, kDeviceRate);
+                const auto& note = longChart->getNotes().front();
+                const auto lastQuarter = note.startSeconds + note.durationSeconds * 0.75;
+
+                check (rangeMagnitude (tones, lastQuarter, note.endSeconds()) > 0.02f,
+                       "exercise audio: a long tone is re-struck before it dies away",
+                       juce::String (rangeMagnitude (tones, lastQuarter, note.endSeconds()), 3));
+            }
+            else
+            {
+                check (false, "exercise audio: the long-tone chart builds", error);
+            }
+        }
     }
 
     wav.deleteFile();

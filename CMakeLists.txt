@@ -16,10 +16,10 @@ set(CMAKE_CXX_STANDARD 20)          # JUCE 9 baseline is C++17; 20 costs nothing
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Static MSVC runtime, so the Standalone and the VST3 both run on a machine with
-# no VC++ redistributable installed. Must be set BEFORE add_subdirectory(JUCE)
-# so JUCE's own targets (and the juce_vst3_helper tool) pick it up too.
-# CMP0091 is NEW by default at cmake_minimum_required 3.22, so this is honoured.
+# Static MSVC runtime, so the app runs on a machine with no VC++ redistributable
+# installed. Must be set BEFORE add_subdirectory(JUCE) so JUCE's own targets pick
+# it up too. CMP0091 is NEW by default at cmake_minimum_required 3.22, so this is
+# honoured.
 if (WIN32)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
@@ -29,36 +29,14 @@ endif()
 #------------------------------------------------------------------------------
 
 # ASIO is OFF by default so the very first build on a clean machine cannot fail
-# on SDK problems. Turning it ON gives the Standalone low-latency access to the
-# Apollo Twin X. The VST3 never needs it — Live owns the audio device.
+# on SDK problems. Turning it ON gives low-latency access to the Apollo Twin X.
 #
 # LICENSING: the ASIO SDK is GPLv3-or-Steinberg-proprietary. JUCE 9 bundles it
 # (modules/juce_audio_devices/native/asio/iasiodrv.h), so no external download is
 # needed, but it MUST stay OFF for any closed-source distribution. See LICENSING.md.
-option(VT_ENABLE_ASIO "Compile ASIO support into the Standalone (see LICENSING.md)" OFF)
+option(VT_ENABLE_ASIO "Compile ASIO support into the app (see LICENSING.md)" OFF)
 
 option(VT_BUILD_TESTS "Build the vt_tests console test runner" ON)
-
-# Copying the built VST3 somewhere your host will find it is a personal-workflow
-# convenience, so it is OFF by default — a fresh clone should not write outside
-# its own build tree.
-#
-# Turn it on with -DVT_COPY_PLUGIN_AFTER_BUILD=ON. Point VT_VST3_COPY_DIR at a
-# USER-WRITABLE folder: writing to C:/Program Files/Common Files/VST3 would
-# require admin elevation on every single build. Then point Live at that folder
-# via Preferences -> Plug-Ins -> "VST3 Plug-In Custom Folder" (Live requires that
-# the custom folder is NOT the system VST3 folder).
-option(VT_COPY_PLUGIN_AFTER_BUILD
-       "Copy the built VST3 into VT_VST3_COPY_DIR after each build" OFF)
-
-if (WIN32)
-    set(VT_VST3_COPY_DIR_DEFAULT "$ENV{USERPROFILE}/VST3Dev")
-else()
-    set(VT_VST3_COPY_DIR_DEFAULT "$ENV{HOME}/VST3Dev")
-endif()
-
-set(VT_VST3_COPY_DIR "${VT_VST3_COPY_DIR_DEFAULT}" CACHE PATH
-    "Destination for the post-build VST3 copy (used only when VT_COPY_PLUGIN_AFTER_BUILD=ON)")
 
 #------------------------------------------------------------------------------
 # JUCE — plain directory at ./JUCE, NOT a git submodule
@@ -67,44 +45,54 @@ set(VT_VST3_COPY_DIR "${VT_VST3_COPY_DIR_DEFAULT}" CACHE PATH
 add_subdirectory(JUCE)
 
 #------------------------------------------------------------------------------
-# The plugin / Standalone
+# The app
+#
+# STANDALONE ONLY. juce_add_plugin with FORMATS Standalone is how JUCE builds a
+# standalone audio application: the wrapper supplies the Audio/MIDI Settings
+# dialog, remembers the chosen device between runs, and drives the engine's
+# processBlock from the device callback. There is no plugin build — nothing here
+# is ever loaded by a host.
 #------------------------------------------------------------------------------
 
 juce_add_plugin(VocalTrainer
     COMPANY_NAME                "SmashingGoodTime"
 
     # PIN THESE. PLUGIN_CODE otherwise defaults to a random value that changes on
-    # EVERY configure, which orphans the plugin in every saved Live set.
+    # EVERY configure, and the standalone wrapper derives the name of its saved
+    # audio-device settings file from it — so a drifting code silently resets the
+    # user's device choice on every reconfigure.
     PLUGIN_MANUFACTURER_CODE    Sgtm
     PLUGIN_CODE                 Vtr1
 
-    FORMATS                     VST3 Standalone
+    FORMATS                     Standalone
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            FALSE
     NEEDS_MIDI_OUTPUT           FALSE
     IS_MIDI_EFFECT              FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    VST3_CATEGORIES             "Fx" "Analyzer"
-
-    # Both configured above. Off by default; see the VT_COPY_PLUGIN_AFTER_BUILD
-    # option for why, and for the folder Live needs to be pointed at.
-    COPY_PLUGIN_AFTER_BUILD     ${VT_COPY_PLUGIN_AFTER_BUILD}
-    VST3_COPY_DIR               "${VT_VST3_COPY_DIR}"
 
     PRODUCT_NAME                "Vocal Trainer")
 
 target_sources(VocalTrainer PRIVATE
-    src/PluginProcessor.cpp
-    src/PluginEditor.cpp
+    src/AudioEngine.cpp
+    src/MainComponent.cpp
+    src/app/AppSettings.cpp
     src/dsp/AnalysisChain.cpp
     src/audio/BackingPlayer.cpp
+    src/audio/TakeRecorder.cpp
     src/chart/Chart.cpp
+    src/chart/ChartWriter.cpp
+    src/exercise/ExerciseLibrary.cpp
+    src/exercise/ExerciseAudio.cpp
+    src/score/TakeScorer.cpp
     src/import/SongImporter.cpp
     src/ui/Theme.cpp
     src/ui/PitchLaneComponent.cpp
     src/ui/NoteHighwayComponent.cpp
     src/ui/ImportOverlayComponent.cpp
-    src/ui/LyricStripComponent.cpp)
+    src/ui/LyricStripComponent.cpp
+    src/ui/ReviewOverlayComponent.cpp
+    src/ui/ChartEditPanelComponent.cpp)
 
 target_include_directories(VocalTrainer PRIVATE
     src
@@ -113,17 +101,17 @@ target_include_directories(VocalTrainer PRIVATE
     #
     # It is needed for exactly one thing: switching OFF the standalone wrapper's
     # "Mute audio input" checkbox. That control swaps an EMPTY BUFFER for the
-    # microphone before the plugin runs, which for an analyser kills the pitch
+    # microphone before the engine runs, which for an analyser kills the pitch
     # display along with the sound. juce_add_plugin puts this module on the
-    # FORMAT targets only, not on the shared-code target that compiles
-    # PluginEditor.cpp, so without this line the __has_include guard there
-    # silently evaluates false and the fix is compiled out.
+    # FORMAT target only, not on the shared-code target that compiles
+    # MainComponent.cpp — so REMOVING THIS LINE BREAKS THE BUILD, which is
+    # deliberate: the include there is hard rather than guarded precisely so this
+    # cannot regress silently again.
     ${CMAKE_CURRENT_SOURCE_DIR}/JUCE/modules)
 
 target_compile_definitions(VocalTrainer PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_ASIO=$<BOOL:${VT_ENABLE_ASIO}>)
 
 # NOTE (deviation from the brief, deliberate):
@@ -169,7 +157,8 @@ if (VT_BUILD_TESTS)
 
     target_sources(vt_chart_tests PRIVATE
         tests/test_chart.cpp
-        src/chart/Chart.cpp)
+        src/chart/Chart.cpp
+        src/chart/ChartWriter.cpp)
 
     target_include_directories(vt_chart_tests PRIVATE src)
 
@@ -200,6 +189,35 @@ if (VT_BUILD_TESTS)
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
 
+    # Scoring and exercise generation. Both are pure juce_core code, so this is
+    # the cheapest target in the project to build and the one that catches the
+    # two most expensive-to-diagnose classes of bug: a scoring change that
+    # punishes vibrato (which reads as "I sang badly", not as a bug), and a
+    # generated exercise with a wrong interval in it (which looks like a
+    # perfectly plausible scale on the highway).
+    juce_add_console_app(vt_score_tests
+        PRODUCT_NAME "vt_score_tests")
+
+    target_sources(vt_score_tests PRIVATE
+        tests/test_score.cpp
+        src/chart/Chart.cpp
+        src/exercise/ExerciseLibrary.cpp
+        src/score/TakeScorer.cpp)
+
+    target_include_directories(vt_score_tests PRIVATE src)
+
+    target_compile_definitions(vt_score_tests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1)
+
+    target_link_libraries(vt_score_tests
+        PRIVATE
+            juce::juce_core
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+
     # BackingPlayer lifecycle. Drives the exact sequence that crashed the app
     # with 0xC0000094 on 2026-08-04: play, releaseResources(), then one more
     # audio callback. WITHOUT the fix this target does not fail, it CRASHES —
@@ -207,9 +225,16 @@ if (VT_BUILD_TESTS)
     juce_add_console_app(vt_backing_tests
         PRODUCT_NAME "vt_backing_tests")
 
+    # The exercise renderers ride along here rather than in vt_score_tests
+    # because they produce AUDIO, and juce_core alone cannot hold a buffer of it.
+    # What is being tested is not the arithmetic but which DECK each sound lands
+    # on — a decision that is silent when wrong.
     target_sources(vt_backing_tests PRIVATE
         tests/test_backing.cpp
-        src/audio/BackingPlayer.cpp)
+        src/audio/BackingPlayer.cpp
+        src/chart/Chart.cpp
+        src/exercise/ExerciseAudio.cpp
+        src/exercise/ExerciseLibrary.cpp)
 
     target_include_directories(vt_backing_tests PRIVATE src)
 
@@ -236,8 +261,10 @@ if (VT_BUILD_TESTS)
 
     target_sources(vt_render_tests PRIVATE
         tests/test_render.cpp
+        src/app/AppSettings.cpp         # library-root detection is tested here too
         src/chart/Chart.cpp
         src/import/SongImporter.cpp
+        src/score/TakeScorer.cpp        # the highway reads NoteScores to recolour notes
         src/ui/Theme.cpp
         src/ui/ImportOverlayComponent.cpp
         src/ui/NoteHighwayComponent.cpp)

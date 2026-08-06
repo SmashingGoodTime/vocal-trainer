@@ -8,8 +8,8 @@
 
     THREADING
     ---------
-    A Chart is IMMUTABLE once constructed, and it lives on the MESSAGE THREAD
-    only. Neither the audio thread nor the analysis worker ever touches it.
+    A Chart lives on the MESSAGE THREAD only. Neither the audio thread nor the
+    analysis worker ever touches it.
 
     That is a deliberate simplification. The worker needs exactly one number
     from the chart — the MIDI note currently being sung — to constrain the
@@ -20,6 +20,27 @@
 
     Parsing is done on a background thread and the finished Chart handed to the
     message thread; see ChartLoader.
+
+    MUTATION — read this before using it
+    ------------------------------------
+    This class was originally immutable after construction, and the edit API
+    below (setNoteMidi / setNoteSyllable / ...) is a deliberate narrowing of
+    that rule, not an abandonment of it. It is safe for exactly the reason the
+    threading note above gives: nothing outside the message thread holds a
+    pointer to a Chart or to anything inside one. The single value the worker
+    needs is re-read from an atomic every frame, so an edit is picked up on the
+    next frame with no synchronisation at all.
+
+    Two invariants ARE load-bearing and every edit function preserves them
+    rather than trusting the caller:
+
+      1. notes stay sorted by startSeconds — noteIndexAt() is a binary search;
+      2. notes stay NON-OVERLAPPING — the renderer, the syllable wipe and the
+         scorer all assume at most one note sounds at a time. Timing edits are
+         therefore CLAMPED against their neighbours instead of being rejected.
+
+    Because an edit can re-sort, note INDICES are not stable across edits. Hold
+    a note's `id` and call indexForId(); the editor does.
 
     ==========================================================================
 */
@@ -223,6 +244,65 @@ public:
 
     const ChartNote* noteById (int id) const noexcept;
 
+    /** Index of the note with this id, or -1. Use this rather than caching an
+        index across an edit — see the MUTATION note at the top of this file. */
+    int indexForId (int id) const noexcept;
+
+    //==========================================================================
+    // EDITING (message thread only). Every one of these keeps the sort order
+    // and the no-overlap invariant intact, and bumps the modified flag.
+    //==========================================================================
+
+    /** The file this chart was read from, or an invalid File for a chart built
+        in memory (a generated exercise). Saving needs it both as the default
+        destination and as the source of the fields this build does not parse. */
+    const juce::File& getSourceFile() const noexcept { return sourceFile; }
+
+    /** True once anything has been edited and not yet saved. */
+    bool isModified() const noexcept { return modified; }
+    void markSaved() noexcept { modified = false; }
+
+    /** Replaces a note's text. An EMPTY string is legal and meaningful — it
+        removes the syllable, which is the right fix when the transcriber
+        invented a word that was never sung. */
+    bool setNoteSyllable (int index, const juce::String& syllable);
+
+    /** Transposes one note. Clamped to 0-127. This is the fix for the single
+        most common chart defect: a note the segmenter put an octave out. */
+    bool setNoteMidi (int index, int midi);
+
+    /** Moves and/or resizes a note, CLAMPED so it cannot cross or overlap its
+        neighbours. Returns false only for an out-of-range index. Because this
+        can re-sort, the caller must re-resolve indices afterwards. */
+    bool setNoteTiming (int index, double startSeconds, double durationSeconds);
+
+    bool setNoteType (int index, NoteType type);
+
+    bool removeNote (int index);
+
+    /** Inserts a note, giving it a fresh unique id. Returns the id, or -1 if it
+        would not fit in the gap available. */
+    int insertNote (double startSeconds, double durationSeconds, int midi,
+                    const juce::String& syllable = {});
+
+    /** Records that a human has taken responsibility for the words.
+
+        This is not bookkeeping: LyricStripComponent renders "asr" lyrics in
+        italic with an auto-transcribed badge, precisely so the singer never
+        practises a guess as though it were the truth. Once the words HAVE been
+        checked by hand, leaving that badge up is its own kind of lie. */
+    void markLyricsManual();
+
+    /** Rewrites the syllables of every note in a phrase from a line of text,
+        one whitespace-separated token per note.
+
+        This is the practical way to fix ASR output: nobody wants to click
+        thirty notes to correct one line, and the alignment is already right —
+        it is only the words that are wrong. Tokens run out: the remaining notes
+        are cleared. Notes run out: the surplus tokens are appended to the last
+        note so no typed text is silently discarded. */
+    bool setPhraseText (int phraseIndex, const juce::String& text);
+
 private:
     juce::String songId, title, artist, backingAudio, referenceAudio;
     juce::String lyricSource { "none" };
@@ -238,8 +318,16 @@ private:
     int lowestMidi = 60, highestMidi = 60;
 
     juce::File baseDirectory;
+    juce::File sourceFile;
+    bool       modified = false;
 
     void finalise();
+
+    /** Post-edit fix-up: re-sort, recount lyrics, recompute the range. Cheap
+        enough at chart sizes (a few thousand notes) to run after every single
+        edit, which is worth far more than the microseconds it costs — a
+        half-updated chart is a rendering bug that looks like a physics one. */
+    void refreshAfterEdit();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Chart)
 };

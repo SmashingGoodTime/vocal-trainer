@@ -24,11 +24,10 @@ $20,000/yr — but it requires a juce.com account and acceptance of the JUCE 9 E
 without registering, the resulting binary is AGPLv3 regardless of what our MIT licence says
 about our code. See <https://juce.com/legal/juce-9-licence/>.
 
-## Bundled inside JUCE, and therefore inside the plugin binary
+## Bundled inside JUCE, and therefore inside the app binary
 
 | Component | Licence | Notes |
 |---|---|---|
-| VST3 SDK 3.8.0 | MIT | Steinberg relicensed VST3 to MIT in Oct 2025. No separate download or agreement. |
 | lunasvg | MIT | JUCE 9's SVG parser. |
 | ASIO SDK | **GPLv3 or Steinberg proprietary** | **Compiled in only when `-DVT_ENABLE_ASIO=ON`, which is not the default.** See the warning below. |
 
@@ -61,7 +60,7 @@ MIDI spec came from **GuitarGame_ChartFormats** (CC0-1.0). The highway colours a
 
 ## Offline Python pipeline
 
-A separate process. Never linked into the plugin binary, so none of this affects the
+A separate process. Never linked into the app binary, so none of this affects the
 licensing of anything you build or ship from `src/`.
 
 | Package | Licence |

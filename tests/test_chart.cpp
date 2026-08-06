@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "chart/Chart.h"
+#include "chart/ChartWriter.h"
 #include "chart/PitchMath.h"
 #include "chart/TimelineMap.h"
 
@@ -368,6 +369,232 @@ int main()
 
         check (vt::Chart::parse (juce::var (42), error) == nullptr,
                "robustness: non-object JSON is rejected");
+    }
+
+    //==========================================================================
+    // EDITING, and the one rule that makes it safe to offer at all: saving must
+    // never lose a field this build does not read.
+    //
+    // songs/synth-demo/chart.json is the right fixture precisely because it is
+    // full of things Chart::parse ignores — $schema, the whole `timing` block,
+    // song.referenceAudioSha1, song.vocalRangeMidi, six generator fields, and a
+    // 772-sample contour. A writer that serialised only the parsed fields would
+    // delete every one of them the first time a user corrected a single word,
+    // and the damage would not surface until the offline pipeline next ran.
+    //==========================================================================
+    {
+        const auto original = findRepoRoot().getChildFile ("songs/synth-demo/chart.json");
+
+        juce::String error;
+        auto chart = vt::Chart::loadFrom (original, error);
+
+        if (chart == nullptr)
+        {
+            check (false, "edit: fixture chart loaded", error);
+        }
+        else
+        {
+            const auto notesBefore = (int) chart->getNotes().size();
+            const auto firstId = chart->getNotes().front().id;
+            const auto midiBefore = chart->getNotes().front().midi;
+
+            check (! chart->isModified(), "edit: a freshly loaded chart is not modified");
+
+            //------------------------------------------------------- pitch
+            chart->setNoteMidi (0, midiBefore - 12);
+
+            check (chart->getNotes()[0].midi == midiBefore - 12,
+                   "edit: an octave correction is applied",
+                   juce::String (chart->getNotes()[0].midi));
+            check (chart->isModified(), "edit: the modified flag is set");
+            check (chart->indexForId (firstId) == 0,
+                   "edit: the note is still findable by id");
+
+            //------------------------------------------------------- lyrics
+            chart->setNoteSyllable (0, "HAND");
+            chart->markLyricsManual();
+
+            check (chart->getNotes()[0].syllable == "HAND",
+                   "edit: a corrected word is applied");
+            check (chart->getLyricSource() == "manual",
+                   "edit: lyricSource becomes manual, so the ASR badge comes off",
+                   chart->getLyricSource());
+
+            //-------------------------------------------- the no-overlap rule
+            // Ask for a start that runs straight through the following note. It
+            // must be clamped, not honoured: the renderer, the syllable wipe and
+            // the scorer all assume at most one note sounds at a time.
+            const auto secondStart = chart->getNotes()[1].startSeconds;
+            chart->setNoteTiming (0, secondStart + 5.0, 4.0);
+
+            bool nonOverlapping = true;
+
+            for (size_t i = 1; i < chart->getNotes().size(); ++i)
+                nonOverlapping = nonOverlapping
+                                   && chart->getNotes()[i].startSeconds
+                                        >= chart->getNotes()[i - 1].endSeconds();
+
+            check (nonOverlapping,
+                   "edit: a timing edit cannot make notes overlap");
+            check ((int) chart->getNotes().size() == notesBefore,
+                   "edit: a timing edit does not add or drop notes");
+
+            //--------------------------------------------- phrase re-flow
+            // Nine tokens onto seven notes. This overwrites the "HAND" set above,
+            // which is the point of a re-flow: it replaces the whole line.
+            chart->setPhraseText (0, "one two three four five six seven eight nine");
+
+            int worded = 0;
+
+            for (const auto& n : chart->getNotes())
+                if (n.syllable.isNotEmpty())
+                    ++worded;
+
+            check (worded == notesBefore,
+                   "edit: a re-flowed line puts a word on every note in the phrase",
+                   juce::String (worded) + " of " + juce::String (notesBefore));
+
+            check (chart->getNotes()[0].syllable == "one"
+                     && chart->getNotes()[1].syllable == "two",
+                   "edit: re-flowed words land in TIME order, not noteIds order",
+                   chart->getNotes()[0].syllable + " / " + chart->getNotes()[1].syllable);
+
+            // Surplus tokens go onto the last note rather than being dropped: text
+            // the user typed must never vanish without them seeing where it went.
+            check (chart->getNotes()[(size_t) notesBefore - 1].syllable.containsIgnoreCase ("nine"),
+                   "edit: surplus words are appended, not silently discarded",
+                   chart->getNotes()[(size_t) notesBefore - 1].syllable);
+
+            //-------------------------------------------------- round trip
+            const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                 .getChildFile ("vt_chart_writer_test")
+                                 .getChildFile ("chart.json");
+
+            temp.deleteFile();
+            temp.getSiblingFile ("chart.json.bak").deleteFile();
+
+            juce::String saveError;
+            const auto saved = vt::ChartWriter::save (*chart, temp, saveError);
+
+            check (saved, "write: the edited chart saves", saveError);
+
+            // Every unread field, checked against the raw JSON rather than
+            // against a reloaded Chart — a Chart would not show their loss.
+            juce::var written;
+            juce::JSON::parse (temp.loadFileAsString(), written);
+
+            const auto has = [&written] (const char* key)
+            {
+                auto* o = written.getDynamicObject();
+                return o != nullptr && o->hasProperty (key);
+            };
+
+            const auto child = [&written] (const char* key)
+            {
+                auto* o = written.getDynamicObject();
+                return o != nullptr ? o->getProperty (key) : juce::var();
+            };
+
+            check (has ("$schema") && has ("timing") && has ("contour"),
+                   "write: unread top-level blocks survive ($schema, timing, contour)");
+
+            const auto contourOut = child ("contour");
+
+            // juce::var::getProperty needs a default value; DynamicObject's
+            // single-argument form is the one wanted here.
+            const juce::Array<juce::var>* fracMidi = nullptr;
+
+            if (auto* contourObj = contourOut.getDynamicObject())
+                fracMidi = contourObj->getProperty ("fracMidi").getArray();
+
+            check (fracMidi != nullptr && fracMidi->size() == 772,
+                   "write: the contour is passed through intact, not regenerated",
+                   fracMidi != nullptr ? juce::String (fracMidi->size()) + " samples"
+                                       : juce::String ("missing"));
+
+            const auto songOut = child ("song");
+            const auto genOut  = child ("generator");
+
+            const auto songHas = [&songOut] (const char* key)
+            {
+                auto* o = songOut.getDynamicObject();
+                return o != nullptr && o->hasProperty (key);
+            };
+
+            check (songHas ("referenceAudioSha1") && songHas ("vocalRangeMidi")
+                     && songHas ("detectedKey"),
+                   "write: unread song fields survive (sha1, vocalRangeMidi, detectedKey)");
+
+            const auto genHas = [&genOut] (const char* key)
+            {
+                auto* o = genOut.getDynamicObject();
+                return o != nullptr && o->hasProperty (key);
+            };
+
+            check (genHas ("tool") && genHas ("version") && genHas ("pitchModel")
+                     && genHas ("generatedAt"),
+                   "write: unread generator fields survive");
+
+            const auto lyricSourceOut = genOut.getDynamicObject() != nullptr
+                                          ? genOut.getDynamicObject()->getProperty ("lyricSource").toString()
+                                          : juce::String();
+
+            check (lyricSourceOut == "manual",
+                   "write: lyricSource IS rewritten - it is ours to own",
+                   lyricSourceOut);
+
+            //------------------------------------------------ reload the edit
+            auto reloaded = vt::Chart::loadFrom (temp, error);
+
+            check (reloaded != nullptr, "write: the saved chart parses again", error);
+
+            if (reloaded != nullptr)
+            {
+                check ((int) reloaded->getNotes().size() == notesBefore,
+                       "write: the note count round-trips",
+                       juce::String ((int) reloaded->getNotes().size()));
+
+                const auto* byId = reloaded->noteById (firstId);
+
+                check (byId != nullptr && byId->midi == midiBefore - 12,
+                       "write: the pitch correction round-trips");
+                check (byId != nullptr && byId->syllable == "one",
+                       "write: the word correction round-trips",
+                       byId != nullptr ? byId->syllable : juce::String());
+                check (reloaded->getLyricSource() == "manual",
+                       "write: lyricSource round-trips as manual");
+                check (! reloaded->getContour().isEmpty(),
+                       "write: the reloaded chart still has its ghost contour");
+            }
+
+            //-------------------------------------------------- second save
+            // Saving over an existing file must leave a .bak behind: hand-editing
+            // a chart is exactly where one mis-click wants an undo.
+            chart->setNoteSyllable (0, "AGAIN");
+            vt::ChartWriter::save (*chart, temp, saveError);
+
+            check (temp.getSiblingFile ("chart.json.bak").existsAsFile(),
+                   "write: the previous version is kept as chart.json.bak");
+
+            temp.getParentDirectory().deleteRecursively();
+        }
+    }
+
+    //==========================================================================
+    // A chart must never be edited down to nothing: Chart::parse refuses a
+    // chart with no notes, so allowing it would let the editor save a file it
+    // could never load again.
+    //==========================================================================
+    {
+        juce::var parsed;
+        juce::JSON::parse ("{\"schemaVersion\":\"1.0\",\"notes\":[{\"id\":0,\"midi\":60,"
+                           "\"startSeconds\":0,\"durationSeconds\":1}]}", parsed);
+
+        juce::String error;
+        auto single = vt::Chart::parse (parsed, error);
+
+        check (single != nullptr && ! single->removeNote (0),
+               "edit: the last remaining note cannot be deleted");
     }
 
     //==========================================================================

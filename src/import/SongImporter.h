@@ -7,10 +7,9 @@
     Runs the offline `vocalchart add-song` pipeline as a child process and
     streams its progress back to the message thread.
 
-    STANDALONE ONLY. The VST3 must never start this. Separation is a
-    multi-minute GPU job; kicking one off from inside Live — which owns the
-    audio device and expects the plugin to return from every call promptly —
-    is a way to make Live look hung. Chart preparation is a before-you-play
+    NEVER on the audio thread, and never during a take. Separation is a
+    multi-minute GPU job: it runs out-of-process precisely so nothing it does
+    can stall the audio callback. Chart preparation is a before-you-play
     activity, not a during-the-song one.
 
     Talking to the child

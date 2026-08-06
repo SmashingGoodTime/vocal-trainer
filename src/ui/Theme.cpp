@@ -148,6 +148,24 @@ namespace
         return juce::roundToInt (d);
     }
 
+    bool readBool (const juce::var& obj, const char* key, bool fallback) noexcept
+    {
+        if (obj.getDynamicObject() == nullptr)
+            return fallback;
+
+        const auto v = obj.getProperty (juce::Identifier (key), juce::var());
+
+        // Accept a real bool, and also 0/1 — a hand-edited theme.json is as
+        // likely to contain "showScoredNotes": 0 as "false".
+        if (v.isBool())
+            return (bool) v;
+
+        if (isNumber (v))
+            return ((double) v) != 0.0;
+
+        return fallback;
+    }
+
     /** Accepts "#RRGGBB", "#AARRGGBB", "RRGGBB", "AARRGGBB". Anything else -> fallback. */
     juce::Colour readColour (const juce::var& obj, const char* key, juce::Colour fallback)
     {
@@ -196,6 +214,11 @@ namespace
     void setProp (juce::DynamicObject::Ptr o, const char* key, float value)
     {
         o->setProperty (juce::Identifier (key), juce::var ((double) value));
+    }
+
+    void setProp (juce::DynamicObject::Ptr o, const char* key, bool value)
+    {
+        o->setProperty (juce::Identifier (key), juce::var (value));
     }
 
     void setProp (juce::DynamicObject::Ptr o, const char* key, const juce::var& value)
@@ -258,10 +281,15 @@ bool Theme::writeDefaultsToFile() const
     setProp (colours, "text",              colourToString (d.text));
     setProp (colours, "textDim",           colourToString (d.textDim));
     setProp (colours, "nowLine",           colourToString (d.nowLine));
+    setProp (colours, "noteScoredGood",    colourToString (d.noteScoredGood));
+    setProp (colours, "noteScoredPoor",    colourToString (d.noteScoredPoor));
+    setProp (colours, "noteNotSung",       colourToString (d.noteNotSung));
+    setProp (colours, "editSelection",     colourToString (d.editSelection));
 
     juce::DynamicObject::Ptr lane (new juce::DynamicObject());
     setProp (lane, "headerHeight",          d.headerHeight);
     setProp (lane, "controlsHeight",        d.controlsHeight);
+    setProp (lane, "controlsRow2Height",    d.controlsRow2Height);
     setProp (lane, "footerHeight",          d.footerHeight);
     setProp (lane, "semitonesVisible",      d.semitonesVisible);
     setProp (lane, "historySeconds",        d.historySeconds);
@@ -284,6 +312,8 @@ bool Theme::writeDefaultsToFile() const
     setProp (highway, "zoomSmoothingHz",        d.zoomSmoothingHz);
     setProp (highway, "ghostContourAlpha",      d.ghostContourAlpha);
     setProp (highway, "ghostContourThicknessPx", d.ghostContourThicknessPx);
+    setProp (highway, "scoredBarAlpha",          d.scoredBarAlpha);
+    setProp (highway, "showScoredNotes",         d.showScoredNotes);
 
     juce::DynamicObject::Ptr trace (new juce::DynamicObject());
     setProp (trace, "trailMs",              d.trailMs);
@@ -380,9 +410,14 @@ bool Theme::loadFrom (const juce::File& file)
     v.text              = readColour (colours, "text",              d.text);
     v.textDim           = readColour (colours, "textDim",           d.textDim);
     v.nowLine           = readColour (colours, "nowLine",           d.nowLine);
+    v.noteScoredGood    = readColour (colours, "noteScoredGood",    d.noteScoredGood);
+    v.noteScoredPoor    = readColour (colours, "noteScoredPoor",    d.noteScoredPoor);
+    v.noteNotSung       = readColour (colours, "noteNotSung",       d.noteNotSung);
+    v.editSelection     = readColour (colours, "editSelection",     d.editSelection);
 
     v.headerHeight          = juce::jlimit (0,     200,    readInt   (lane, "headerHeight",          d.headerHeight));
     v.controlsHeight        = juce::jlimit (0,     200,    readInt   (lane, "controlsHeight",        d.controlsHeight));
+    v.controlsRow2Height    = juce::jlimit (0,     200,    readInt   (lane, "controlsRow2Height",    d.controlsRow2Height));
     v.footerHeight          = juce::jlimit (0,     200,    readInt   (lane, "footerHeight",          d.footerHeight));
     v.semitonesVisible      = juce::jlimit (2.0f,  60.0f,  readFloat (lane, "semitonesVisible",      d.semitonesVisible));
     v.historySeconds        = juce::jlimit (0.05f, 10.0f,  readFloat (lane, "historySeconds",        d.historySeconds));
@@ -405,6 +440,8 @@ bool Theme::loadFrom (const juce::File& file)
     v.zoomSmoothingHz          = juce::jlimit (0.05f, 30.0f, readFloat (highway, "zoomSmoothingHz",         d.zoomSmoothingHz));
     v.ghostContourAlpha        = juce::jlimit (0.0f,  1.0f,  readFloat (highway, "ghostContourAlpha",       d.ghostContourAlpha));
     v.ghostContourThicknessPx  = juce::jlimit (0.25f, 8.0f,  readFloat (highway, "ghostContourThicknessPx", d.ghostContourThicknessPx));
+    v.scoredBarAlpha           = juce::jlimit (0.0f,  1.0f,  readFloat (highway, "scoredBarAlpha",          d.scoredBarAlpha));
+    v.showScoredNotes          =                             readBool  (highway, "showScoredNotes",         d.showScoredNotes);
 
     v.trailMs               = juce::jlimit (50,    5000,   readInt   (trace, "trailMs",              d.trailMs));
     v.ringMs                = juce::jlimit (v.trailMs, 20000, readInt (trace, "ringMs",              d.ringMs));

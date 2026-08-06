@@ -1,38 +1,69 @@
-# Vocal Trainer for Ableton Live 11 — Architecture & Implementation Design
+# Vocal Trainer — Architecture & Implementation Design
 
 **Status:** Decided. Hand to engineering.
-**Target:** Windows 11 Home, Ableton Live 11, UAD Apollo Twin X (Thunderbolt), solo developer.
-**Date:** 2026-08-01
+**Target:** Windows 11 Home, UAD Apollo Twin X (Thunderbolt), solo developer.
+**Date:** 2026-08-01, revised 2026-08-06 (VST3 dropped — see below).
 
 ---
 
-## 1. RECOMMENDED ARCHITECTURE
+> ### 2026-08-06 — CHANGE OF DIRECTION: STANDALONE ONLY
+>
+> **The VST3 target has been dropped and the app is standalone only.** Milestone 4
+> (VST3 + Ableton sync + calibration) is cancelled; it was never started.
+>
+> This document originally specified two targets sharing one codebase, and section 1
+> below argued for exactly that. The objection it answers — "Ableton contributes only
+> backing-track playback and mic capture, and a standalone app does both" — turned out
+> to be the right call, and the standalone reached feature-complete before the VST3
+> branch was begun. Everything the host was going to supply, the app now supplies
+> itself: the backing track is a `juce::AudioTransportSource` it owns, and chart time
+> comes from that transport rather than from a playhead.
+>
+> **Deleted outright:** `AudioPlayHead` handling, the transport seqlock
+> (`TransportSnapshot` / `TransportSeqlock` are gone from `LockFreeTypes.h`), the five
+> offset parameters, the "Capture playhead" anchor button, the calibration wizard, the
+> Arrangement-View-only workflow constraint, and every Live window/DPI/rescan concern.
+>
+> **Unchanged:** everything else. The DSP chain, the chart format, the scoring, the
+> highway geometry and the offline pipeline never depended on the host.
+>
+> Sections below are kept as the record of why decisions were made. Where a section
+> describes VST3 mechanics, read it as history, not as instructions.
 
-**Build one JUCE 9 C++ codebase compiled to two targets — `Standalone` and `VST3` — where the VST3 is a zero-latency pass-through audio effect on the mic track in Ableton's Arrangement View, and both targets share 100% of the DSP, chart, scoring and rendering code.** The offline chart-generation pipeline is a completely separate Python 3.11 CLI that never ships inside the plugin.
+---
 
-`juce_add_plugin(... FORMATS VST3 Standalone ...)` produces both from the same source. This is not a compromise between two architectures — it is the single architecture, and the Standalone target is what you develop against for the first three milestones.
+## 1. ARCHITECTURE
 
-### The three strongest reasons
+**One JUCE 9 C++ codebase built as a standalone desktop application** — it owns the audio
+device, reads the mic, plays the backing track, and shares 100% of its DSP, chart, scoring
+and rendering code with nothing else. The offline chart-generation pipeline is a completely
+separate Python 3.11 CLI that never ships inside the app.
 
-1. **Transport sync is free and exact, and every alternative rebuilds a clock badly.** In the VST3, `juce::AudioPlayHead::getPosition()` hands you `timeInSamples` as an exact `int64` once per `processBlock` — sample-resolution host time, no drift, no PLL. The alternatives are all measurably worse: Ableton Link *structurally cannot* carry song position (it synchronises "tempo, beat, and phase" across independent timelines — see https://ableton.github.io/link/ — it can never tell you "we are 97.4 seconds into the song"); AbletonOSC's `/live/song/start_listen/beat` fires **once per beat** (500 ms at 120 BPM — you would extrapolate 30 frames between samples); Windows MIDI clock jitters ~2.5 ms even with pro drivers and its Song Position Pointer wraps around bar 1025.
+`juce_add_plugin(... FORMATS Standalone ...)` is how JUCE builds this: the plugin client's
+standalone wrapper supplies the Audio/MIDI Settings dialog, remembers the chosen device, and
+drives `processBlock` from the device callback. There is no plugin build.
 
-2. **No audio device contention, and the mic signal arrives already conditioned.** The plugin sees the post-UAD-chain signal at whatever buffer Live is running. There is no second application competing for the Apollo's single-client ASIO driver, no ASIO Link Pro in the path (already flagged as a flaky component on this rig), and no startup-order superstition. This directly retires the highest-friction item in the existing setup.
+### The reasons that still hold
 
-3. **One artifact, one language, one clock, no IPC.** The pitch estimate produced on the audio thread and the note it is scored against live in the same address space, timestamped in the same sample domain. A web front end talking to a bridge process over WebSocket adds a serialisation boundary, a second runtime, a second install, and a clock you have to reconcile — for a GUI capability (2D scrolling, 60 fps) that JUCE 8+'s Direct2D renderer handles without breaking a sweat.
+1. **One artifact, one language, one clock, no IPC.** The pitch estimate produced on the audio thread and the note it is scored against live in the same address space, timestamped in the same sample domain. A web front end talking to a bridge process over WebSocket adds a serialisation boundary, a second runtime, a second install, and a clock you have to reconcile — for a GUI capability (2D scrolling, 60 fps) that JUCE 8+'s Direct2D renderer handles without breaking a sweat.
 
-### The strongest honest objection
+2. **The backing track is the clock, and it is exact.** Chart time is the transport's own position, read from the same `AudioTransportSource` that is producing the sound the singer is following. There is nothing to synchronise, because there is only one clock.
 
-**Ableton contributes only two things at practice time — backing-track playback and mic capture — and both can be done by a standalone app, which would eliminate the entire transport-sync problem class, Live's documented VST3 window/DPI bugs, and the plugin-rescan development loop.** This is a genuinely strong argument and it is nearly right.
+3. **No host in the loop at all.** No plugin rescan cycle, no Live window/DPI bugs, no Arrangement-View-only workflow constraint, and a ~2 s launch.
 
-The reason it does not change the recommendation: **the recommended architecture already is that standalone app for the first three milestones.** The JUCE `Standalone` target launches in ~2 seconds, needs no host, has no rescan cache, and has none of Live's window-sizing bugs. You will build and tune the entire game — highway, trace, lyrics, scoring, feel — inside it. The VST3 is an *additive* branch of roughly 50 lines (read the playhead instead of the internal clock) that arrives at Milestone 4.
+### The original transport argument, kept as history
 
-The residual risk is real and worth naming: **if, after Milestone 4, you find Ableton adds nothing to your practice loop, stop building the VST3 and you lose nothing.** The standalone is not throwaway scaffolding; it is a first-class deliverable that happens to also be the fastest development harness.
+The first version of this document justified the VST3 on transport sync: `juce::AudioPlayHead::getPosition()` hands you `timeInSamples` as an exact `int64` once per `processBlock`, and every way of getting song position *out* of Live is worse — Ableton Link *structurally cannot* carry song position (it synchronises "tempo, beat, and phase" across independent timelines — see https://ableton.github.io/link/ — it can never tell you "we are 97.4 seconds into the song"); AbletonOSC's `/live/song/start_listen/beat` fires **once per beat** (500 ms at 120 BPM — you would extrapolate 30 frames between samples); Windows MIDI clock jitters ~2.5 ms even with pro drivers and its Song Position Pointer wraps around bar 1025.
+
+That analysis is still correct, and it is still the reason not to reach for Link, OSC or MIDI clock if the app ever needs to follow an external timeline. It stopped mattering because the app no longer needs song position from anywhere — it owns the transport.
+
+The other original argument was that a plugin sees the post-UAD-chain mic signal with no device contention. The standalone gets the same signal by opening the Apollo directly; the trade is that startup order now matters (Apollo and its console up before the app), which is noted under `VT_ENABLE_ASIO` in the README.
 
 ### The second objection, and its answer
 
 **C++ GUI iteration is slow, and game feel needs dozens of tweak-look-tweak cycles.** True, and it is the most likely cause of project abandonment. Two mitigations, both mandatory:
 
-- Develop against the Standalone target (~2 s launch, no host, no rescan).
+- A standalone app (~2 s launch, no host, no rescan).
 - Put **every** tuning constant — scroll rate, lookahead seconds, tolerance thresholds, colours, easing curves, bar geometry, gate thresholds — in `%APPDATA%\VocalTrainer\theme.json`, hot-reloaded by a `juce::FileChooser`-free `juce::Timer` polling the file's modification time at 4 Hz. Tuning the look then requires **zero rebuilds**. Budget half a day to build this in Milestone 1; it pays for itself in the first week.
 
 ### Explicitly rejected, with reasons
@@ -40,10 +71,9 @@ The residual risk is real and worth naming: **if, after Milestone 4, you find Ab
 | Rejected | Killer objection |
 |---|---|
 | **Max for Live** | M4L device height is hard-capped at **169 px** (https://docs.cycling74.com/userguide/m4l/live_userinterfaces/) — an embedded note highway is impossible, so you must spawn a `jit.world`/`jweb` window and inherit all standalone-app complexity *plus* Max's constraints. Compounded: Live 11 ships Max 8, whose `js` object is an ES3/ES5-era engine (V8 is Max 9 / Live 12 only); `jweb` cannot load HTML from a **frozen** device; Node-for-Max has acknowledged M4L problems; and it may require a Suite/M4L licence the user does not own. |
-| **JUCE 8+ WebView UI (WebView2)** | Adds a second DPI and window-lifecycle surface on top of Live's already-buggy VST3 window handling. Direct2D + `VBlankAttachment` is sufficient for a 2D highway. Keep as the escape hatch if Direct2D underperforms on this GPU. |
+| **JUCE 8+ WebView UI (WebView2)** | Adds a DPI and window-lifecycle surface for nothing. Direct2D + `VBlankAttachment` is sufficient for a 2D highway. Keep as the escape hatch if Direct2D underperforms on this GPU. |
 | **Pure browser + MIDI clock / Web MIDI** | Combines the worst clock (Windows MIDI clock jitter, SPP wraparound, Web MIDI's documented inability to do drift-corrected timing) with the worst input path (Chrome-on-Windows shared-mode WASAPI, measured 55–67 ms default input→output). |
-| **CLAP** | Ableton does not support it. Not on the table. |
-| **VST2** | SDK is unobtainable. `juce_set_vst2_sdk_path` cannot be satisfied. |
+| **Any plugin format (VST3, CLAP, VST2)** | Dropped 2026-08-06 — see the note at the top. A host buys nothing the app cannot do itself, and costs a rescan loop, a window/DPI surface, and a second clock to reconcile. |
 
 ---
 
@@ -82,15 +112,15 @@ flowchart TB
 
     A12 --> L1
 
-    subgraph RT["RUNTIME — JUCE 9, Standalone or VST3 in Ableton Live 11"]
+    subgraph RT["RUNTIME — JUCE 9 standalone app"]
         direction TB
 
         subgraph AUD["AUDIO THREAD — 2.67 ms deadline @128 samples"]
-            R1["processBlock<br/>buffer UNTOUCHED = pass-through"]
+            R1["processBlock<br/>mic arrives in the shared buffer"]
             R2["Butterworth HPF 65 Hz<br/>juce::dsp::IIR::Filter"]
             R3["Anti-alias FIR 7.2 kHz<br/>+ WindowedSinc resample to 16 kHz"]
-            R4["Push 128-sample chunks<br/>tagged with hostSampleIndex<br/>juce::AbstractFifo"]
-            R5["getPlayHead()-&gt;getPosition()<br/>publish via seqlock"]
+            R4["Push 128-sample chunks<br/>tagged with device sample index<br/>juce::AbstractFifo"]
+            R5["Monitor gain ramp,<br/>then mix BackingPlayer decks in"]
             R1 --> R2 --> R3 --> R4
             R1 --> R5
         end
@@ -107,8 +137,8 @@ flowchart TB
 
         subgraph GUI["MESSAGE THREAD — VBlankAttachment"]
             R12["Drain PitchEstimate FIFO"]
-            R13["Read transport seqlock<br/>+ extrapolate to vblank time"]
-            R14["Map arrangement to chart seconds"]
+            R13["Read BackingPlayer position<br/>= chart time"]
+            R14["Map stream to chart seconds"]
             R15["Paint note highway<br/>+ trace + lyrics"]
             R16["Score accumulator<br/>200 ms trailing median"]
             R12 --> R14
@@ -118,14 +148,14 @@ flowchart TB
 
         R4 -.->|"lock-free SPSC"| R6
         R11 -.->|"lock-free SPSC"| R12
-        R5 -.->|"seqlock"| R13
         L1 -.->|"async parse,<br/>atomic pointer swap"| R14
     end
 
-    MIC(["Mic → Apollo Twin X<br/>→ UAD chain → Live mic track"]) --> R1
-    R1 --> OUTP(["Pass-through to Live<br/>setLatencySamples(0)"])
-    L2 --> ABL(["Backing track:<br/>Arrangement audio clip (VST3)<br/>or juce::AudioTransportSource (Standalone)"])
+    MIC(["Mic → Apollo Twin X<br/>→ UAD chain → audio device"]) --> R1
+    L2 --> ABL(["Backing track:<br/>juce::AudioTransportSource<br/>— owns the clock"])
     ABL --> R5
+    R5 --> OUTP(["Headphones<br/>setLatencySamples(0)"])
+    ABL -.->|"getPositionSeconds()"| R13
     R15 --> DISP(["Display — 60 Hz"])
 ```
 
@@ -163,7 +193,7 @@ An **optional** `tempoMap` is carried for bar-line rendering and future slow-dow
   },
 
   "song": {
-    "id": "amazing-grace-demo",             // folder name; the ONLY thing stored in plugin state
+    "id": "amazing-grace-demo",             // folder name; the ONLY thing stored in session state
     "title": "Amazing Grace",
     "artist": "Traditional",
     "durationSeconds": 168.400,
@@ -179,7 +209,7 @@ An **optional** `tempoMap` is carried for bar-line rendering and future slow-dow
     "unit": "seconds",
     "epoch": "referenceAudioStart",         // chart t=0 == first sample of referenceAudio
     "arrangementAnchorSeconds": 8.000,      // HINT ONLY: arrangement time where chart t=0 sits.
-                                            // Authoritative value lives in plugin state (APVTS).
+                                            // Authoritative value lives in session state (APVTS).
                                             // null == not yet captured.
     "rateFactor": 1.0,                      // 1.0 = unwarped. projectBPM/chartBPM if warped.
     "tempoMap": [                           // OPTIONAL, advisory, bar lines only
@@ -423,7 +453,7 @@ Algorithm, in order:
 6. Enforce `min_note_duration = 120 ms` (SwiftF0's 50 ms default is far too short for singing).
 7. Bridge unvoiced gaps shorter than **80 ms** *inside* a note (consonants) rather than splitting.
 8. Assign each note the **median of the middle 60%** of its cents values — discards the leading scoop and the trailing fall-off.
-9. Snap to nearest semitone; **store the raw cents deviation** as `centsOffset` so the plugin can say "the reference singer was 30 cents flat here."
+9. Snap to nearest semitone; **store the raw cents deviation** as `centsOffset` so the app can say "the reference singer was 30 cents flat here."
 10. Merge adjacent notes with the same snapped semitone separated by < 80 ms unless a strong onset peak sits between them.
 
 Also emit the raw contour downsampled to 100 Hz into `chart.contour`.
@@ -473,7 +503,7 @@ CPU-only is "start it and make coffee," not "painful" — and Stage 0 disappears
 
 ---
 
-## 5. RUNTIME PLUGIN DESIGN
+## 5. RUNTIME APP DESIGN
 
 ### Build configuration
 
@@ -487,32 +517,29 @@ endif()
 
 add_subdirectory(JUCE)                        # git submodule, pinned to the 9.0.0 tag
 
-juce_add_plugin(VocalTrainer
-    COMPANY_NAME              "SmashingGoodTime"
-    PLUGIN_MANUFACTURER_CODE  Sgtm            # PIN THESE. PLUGIN_CODE defaults to a random
-    PLUGIN_CODE               Vtr1            # value that CHANGES EVERY CONFIGURE, which
-                                              # orphans the plugin in every saved Live set.
-    FORMATS                   VST3 Standalone
+juce_add_plugin(VocalTrainer                  # STANDALONE ONLY — this is how JUCE builds a
+    COMPANY_NAME              "SmashingGoodTime"   # standalone audio app. There is no plugin build.
+    PLUGIN_MANUFACTURER_CODE  Sgtm            # PIN THESE. PLUGIN_CODE defaults to a random value
+    PLUGIN_CODE               Vtr1            # that CHANGES EVERY CONFIGURE, and the standalone
+                                              # wrapper names its saved audio-device settings file
+                                              # from it — a drifting code silently resets the
+                                              # user's device choice on every reconfigure.
+    FORMATS                   Standalone
     IS_SYNTH                  FALSE
     NEEDS_MIDI_INPUT          FALSE
     NEEDS_MIDI_OUTPUT         FALSE
     IS_MIDI_EFFECT            FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    VST3_CATEGORIES           "Fx" "Analyzer"
-    COPY_PLUGIN_AFTER_BUILD   ${VT_COPY_PLUGIN_AFTER_BUILD}   # opt-in, default OFF
-    VST3_COPY_DIR             "${VT_VST3_COPY_DIR}"            # default %USERPROFILE%/VST3Dev
     PRODUCT_NAME              "Vocal Trainer")
 
 target_compile_definitions(VocalTrainer PUBLIC
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_ASIO=1                               # Standalone only in practice; see LICENSE section
+    JUCE_ASIO=$<BOOL:${VT_ENABLE_ASIO}>       # default OFF; see the LICENSING section
     JUCE_DISPLAY_SPLASH_SCREEN=0)
 ```
 
-- **`VST3_COPY_DIR` to a user folder**, then enable it in Live → Preferences → Plug-Ins → "VST3 Plug-In Custom Folder". Writing to `C:\Program Files\Common Files\VST3` needs admin elevation on every build. Ableton warns the custom folder must not point at the system VST3 folder. Both values are driven by cache variables (`VT_COPY_PLUGIN_AFTER_BUILD`, default **OFF**, and `VT_VST3_COPY_DIR`, default `%USERPROFILE%/VST3Dev`) rather than being hardcoded — a fresh clone must not write outside its own build tree, and a path from one developer's machine breaks configure on every other one.
-- **JUCE's `JUCEUtils.cmake` reorders `VST3_CATEGORIES` to force `Fx` first.** This is a JUCE-acknowledged bug (forum thread 62130, staff member `attila`: "removing the reordering entirely is something we'll consider"). Benign here — `Fx` first is exactly what you want for an audio effect.
-- **Turn OFF "Auto-Scale Plug-In Window"** in Live's Preferences. It causes blurry JUCE VST3 editors on Windows above 100% display scaling — a years-old unresolved JUCE/Ableton interaction, still reported against Live 12 on Windows 11 at 125%.
+- **`JUCE/modules` must be on the shared-code target's include path.** `juce_add_plugin` puts `juce_audio_plugin_client` on the *format* target only, not on the shared-code target that compiles `MainComponent.cpp` — which needs `juce_StandaloneFilterWindow.h` to switch off the wrapper's "Mute audio input" checkbox. That include is deliberately hard rather than `__has_include`-guarded: it once failed silently and the build stayed green with the fix missing.
+- **`JUCE_DISPLAY_SPLASH_SCREEN` is not set in the real build.** JUCE 8 removed the splash screen and JUCE 9 warns if the flag is defined at all; `JUCE_REPORT_APP_USAGE` no longer exists. The block above is the original design; `CMakeLists.txt` documents the deviation.
 
 **JUCE 9 breaking changes to plan around before copying any tutorial code** (`BREAKING_CHANGES.md`):
 - `Drawable` **no longer inherits from `Component`** — use the new `DrawableComponent` wrapper.
@@ -541,11 +568,9 @@ bool VocalTrainerProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 }
 ```
 
-JUCE hands `processBlock` a **single buffer used for both input and output**, so an empty `processBlock` is already bit-exact pass-through — no copying needed in your code. (The VST3 wrapper does its own two copies internally; that is not your concern and does not alter the signal.)
+JUCE hands `processBlock` a **single buffer used for both input and output**, so the mic is already in place and no copying is needed to read it. The output stage then applies the monitor gain ramp and mixes the `BackingPlayer` decks in — strictly *after* the analysis chain has read the input, or the backing track would leak into the pitch detector.
 
-The plugin must be an **audio effect on the mic track** — instrument devices only go on MIDI tracks and would never see the mic signal. (Note: Live *does* allow audio effects on MIDI tracks after an instrument, on returns, and on the master; the constraint is specifically that the mic audio lives on an audio track.)
-
-**`setLatencySamples(0)` — never change it.** This plugin adds no delay to the signal. Reporting `N > 0` would make Live delay every other track by `N` via PDC, add real audible delay to a live-monitored vocal for zero benefit, interact inconsistently with "Reduced Latency When Monitoring" (which bypasses device latency on armed tracks), and expose you to Live's documented dynamic-latency bugs (VST2 pinning latency at 0 regardless; JUCE 5.4.7 shipped a `setLatencySamples()` crash on Live session restore). Keeping it at zero also means the host never pre-shifts your `ppqPosition`, so an entire class of "which chunk of logical stream time am I in" problems simply does not exist.
+**`setLatencySamples(0)` — never change it.** Nothing here delays the signal: the analysis chain taps the buffer, it does not sit in front of it. Reporting `N > 0` would make the standalone wrapper add real audible delay to a live-monitored vocal for zero benefit. The analysis front end compensates its own latency in the **timestamps** it hands the GUI, which is where that correction belongs.
 
 ### Thread architecture
 
@@ -555,71 +580,34 @@ Three threads, two lock-free channels, zero locks in the audio path.
 
 Responsibilities, and **nothing else**:
 
-1. Leave the buffer untouched (pass-through).
+1. Read the mic out of the shared buffer without copying it.
 2. Sum to mono, apply a 2nd-order Butterworth HPF at **65 Hz** (`juce::dsp::IIR::Filter<float>` with `IIR::Coefficients<float>::makeHighPass`). At 12 dB/oct a 65 Hz corner is only ~1–2 dB down at E2 (82 Hz), so bass fundamentals survive.
 3. Anti-alias FIR lowpass at **7.2 kHz** (63 taps, group delay 0.65 ms at 48 kHz) then resample to **exactly 16000 Hz** via `juce::Interpolators::WindowedSinc` with `speedRatio = hostSampleRate / 16000.0`. Handles 44.1/48/88.2/96 uniformly, no fractional-rate special cases.
    **Critical:** compute frequency using the *actual* 16000 rate. Using 44100/48000 by mistake is a **145-cent** error — enormous, obvious, and embarrassing.
 4. Accumulate into a staging buffer; whenever 128 resampled samples (= 8 ms = one hop) are ready, push one `AudioChunk` into `juce::AbstractFifo`.
-5. Read the playhead **exactly once**, publish via seqlock.
+5. Apply the monitor gain ramp, then mix the backing decks in.
 
 ```cpp
 struct AudioChunk {                    // 528 bytes, trivially copyable, preallocated
-    int64_t hostSampleIndexOfFirst;    // exact host-domain timestamp of data[0]
+    int64_t hostSampleIndexOfFirst;    // exact device-domain timestamp of data[0]
     int     numSamples;                // always 128
     float   data[128];                 // 16 kHz mono
 };
 // juce::AbstractFifo, capacity 64 chunks = 512 ms of slack
 ```
 
-Tagging every chunk with its host sample index is what makes timestamp-correct rendering exact. Do not try to reconstruct timestamps from a running float counter — the error accumulates.
+Tagging every chunk with its device sample index is what makes timestamp-correct rendering exact. Do not try to reconstruct timestamps from a running float counter — the error accumulates. The index comes from a **free-running counter** advanced by `numSamples` every block, deliberately never reset in `prepareToPlay()` — resetting it mid-session would make every already-queued chunk's timestamp a lie.
 
-**Playhead handling — the single most common source of "Ableton bug" reports that are actually your bug:**
+> **Removed 2026-08-06.** This section formerly specified reading `AudioPlayHead::getPosition()`
+> once per block and publishing a `TransportSnapshot` through a seqlock, with a long warning
+> about unwrapping `getTimeInSamples()` explicitly because `if (auto x = ...)` is false at
+> sample 0. All of it is gone with the VST3: `TransportSnapshot` and `TransportSeqlock` have
+> been deleted from `LockFreeTypes.h`, and chart time now comes from
+> `BackingPlayer::getPositionSeconds()` on the message thread. The `std::optional` trap is
+> preserved in the risk register (§11) because it is a good general lesson, not because any
+> code here can still hit it.
 
-```cpp
-// getPosition() may ONLY be called from processBlock. Anywhere else is undefined behaviour.
-if (auto* ph = getPlayHead())
-{
-    if (auto pos = ph->getPosition())
-    {
-        // EXPLICIT std::optional. NEVER `if (auto x = pos->getTimeInSamples())` —
-        // that evaluates FALSE at sample 0, i.e. exactly at song start, i.e. exactly
-        // where a chart-sync bug is most visible and most likely to be blamed on Live.
-        const std::optional<int64_t> ts = pos->getTimeInSamples();
-        const std::optional<double>  bpm = pos->getBpm();
-        const bool playing = pos->getIsPlaying();   // bare bool, not Optional
-
-        if (ts.has_value())
-            transport.publish ({ *ts, playing, bpm.value_or (120.0), currentSampleRate });
-    }
-}
-```
-
-Live populates `timeInSamples`, `timeInSeconds`, `ppqPosition`, `bpm`, `isPlaying`, `isRecording`, `isLooping`, `timeSignature`. Treat `editOriginTime` and `hostTimeNs` as absent. **Discard or repair the first block after a transport-state change** — Live reports wrong position info on the first render buffer after a clip start.
-
-Use `timeInSamples` (exact `int64`) as the master clock and derive seconds as `timeInSamples / sampleRate`. Use `ppqPosition` only if you draw a musical grid.
-
-The transport snapshot goes through a **seqlock** (~20 lines) rather than an `std::atomic<struct>`, because the struct exceeds the lock-free scalar width:
-
-```cpp
-class TransportSeqlock {
-    std::atomic<uint32_t> seq { 0 };
-    TransportSnapshot data {};
-public:
-    void publish (const TransportSnapshot& s) noexcept {          // audio thread
-        seq.fetch_add (1, std::memory_order_release);
-        data = s;
-        seq.fetch_add (1, std::memory_order_release);
-    }
-    bool read (TransportSnapshot& out) const noexcept {           // GUI thread
-        const auto a = seq.load (std::memory_order_acquire);
-        if (a & 1u) return false;                                 // write in progress
-        out = data;
-        return seq.load (std::memory_order_acquire) == a;
-    }
-};
-```
-
-**Also: make `prepareToPlay()` idempotent and cheap, and keep chart/anchor/offset state entirely outside it.** Live calls `prepareToPlay()` **repeatedly** on VST3 during a plugin's lifetime, unlike AU where it fires once. Any state reset there — a recomputed chart anchor, a cleared analysis buffer — will fire at unpredictable times mid-session.
+**Also: make `prepareToPlay()` idempotent and cheap, and keep chart/anchor state entirely outside it.** It runs again on every audio device, sample-rate or block-size change — all of which the singer can trigger from Audio Settings mid-session. Any state reset there will fire at unpredictable times.
 
 #### Worker thread — `juce::Thread` + `juce::WaitableEvent`
 
@@ -644,11 +632,11 @@ At a 1024-sample window with a 128-sample hop, that is **125 estimates per secon
 
 **Not a 60 Hz `juce::Timer`.** `VBlankAttachment` (JUCE ≥7.0.6) calls your function at every vertical blank of the display the component is on, inline right before JUCE's paint cycle. A free-running 60 Hz timer beats against non-60 Hz displays and produces visible judder. Alternatively use JUCE 8's `juce_animation` module with `VBlankAnimatorUpdater`.
 
-Per vblank: drain the `PitchEstimate` FIFO into a ring of the last ~600 ms; read the transport seqlock and extrapolate forward by wall-clock delta while playing; map arrangement seconds → chart seconds; `repaint(highwayBounds)` only.
+Per vblank: drain the `PitchEstimate` FIFO into a ring of the last ~600 ms; read `BackingPlayer::getPositionSeconds()` for chart time; map stream seconds → chart seconds; `repaint(highwayBounds)` only.
 
 `paint()` is audio code. **No allocation per frame.** Pre-allocate `juce::Path`, `juce::Image`, `juce::ColourGradient` as members. `setBufferedToImage(true)` on static layers (lane lines, background grid, the fixed lyric block). Set `JUCE_ENABLE_REPAINT_DEBUGGING=1` during development to see what is actually redrawing.
 
-**Do NOT use `juce::OpenGLContext`.** JUCE 8+ makes Direct2D the default Windows renderer (GPU rasterised) and it is sufficient for a 2D scrolling highway. OpenGL in plugin windows has a documented failure record specifically in Ableton on Windows: VST3 crashes creating OpenGL editors on a secondary display with different DPI scaling (JUCE 8.0.10, reported 2025/26); complete UI freeze-out under load with multiple instances (message-thread/MML-lock contention); black screens on older Intel iGPUs; *worse* HiDPI scaling. There is also a known problem mixing Direct2D and OpenGLContext in the same app. If Direct2D underperforms on this specific machine (JUCE warns it can be slower than the software renderer on integrated-only GPUs with no dedicated VRAM), the escape hatch is `JUCE_DIRECT2D=0`, not OpenGL.
+**Do NOT use `juce::OpenGLContext`.** JUCE 8+ makes Direct2D the default Windows renderer (GPU rasterised) and it is sufficient for a 2D scrolling highway. JUCE's OpenGL path on Windows has a documented failure record: crashes creating OpenGL editors on a secondary display with different DPI scaling (JUCE 8.0.10, reported 2025/26); complete UI freeze-out under load (message-thread/MML-lock contention); black screens on older Intel iGPUs; *worse* HiDPI scaling. There is also a known problem mixing Direct2D and OpenGLContext in the same app. If Direct2D underperforms on this specific machine (JUCE warns it can be slower than the software renderer on integrated-only GPUs with no dedicated VRAM), the escape hatch is `JUCE_DIRECT2D=0`, not OpenGL.
 
 ### Pitch detection: **hand-rolled MPM / McLeod NSDF**
 
@@ -697,29 +685,27 @@ where   r'(τ) = Σ x[j]·x[j+τ]          ← via FFT autocorrelation, size 204
 
 **Smooth in the log domain (fractional MIDI), never in Hz.** Smoothing in Hz makes high notes look jumpier than low notes for identical cents error. The 1-Euro filter's adaptive cutoff is exactly the property wanted: rock-steady on a sustained note, instantly responsive on a real scoop or note change — smooth without lying.
 
-### Transport sync and offset handling
+### Transport and chart time
 
-**Arrangement View only. This is a hard workflow requirement, not a preference.** Ableton's Live 11 manual (Session View chapter) states that when a Session clip is launched, "the Arrangement Position fields will continue running… These fields keep a continuous flow of musical time going… regardless of what your individual Session clips are doing." The playhead is *global song time*, never clip-relative. Launch quantisation puts clip t=0 at an arbitrary global beat, and a looping clip repeats while global position monotonically increases. **Chart sync from the playhead in Session View is structurally impossible** — it produces a highway that is confidently, completely wrong. Document the requirement, and make the "Capture playhead as chart anchor" button the only way to set the anchor so the workflow is self-enforcing.
+**The backing track is the transport.** `BackingPlayer` owns a `juce::AudioTransportSource`,
+and `getPositionSeconds()` on it *is* chart time — the singer syncs to what they hear, so
+running the highway off any other clock would let the two drift apart. With no backing track
+loaded (free sing, or an a cappella chart) the clock falls back to the audio-stream position:
+estimates arrive at a steady 125 Hz even during silence, so the stream is drift-free and is
+already the timebase those estimates are stamped in. `chart/TimelineMap.h` is the one place
+the two are converted.
 
-Five parameters, in the `AudioProcessorValueTreeState`:
-
-| Parameter | Purpose | Range / default |
-|---|---|---|
-| `chartAnchorSeconds` | Arrangement time at which chart t=0 occurs. Set by a **"Capture playhead"** button; also numeric entry in seconds and bars:beats. | 0 … songLength |
-| `fileStartOffsetSeconds` | Where in the source file the clip's start marker sits (nonzero if the clip head was trimmed) | 0.0 |
-| `rateFactor` | 1.0 unwarped; `projectBPM/chartBPM` if warped; also drives slow-down practice | 0.5 … 1.5, default 1.0 |
-| `visualOffsetMs` | **The calibration trim.** Absorbs every unmodelled latency term. | −200 … +200, default 0 |
-| `monitoringMode` | `{ConsoleDirect, DAWMonitor}` — pre-seeds `visualOffsetMs` | ConsoleDirect |
-
-```
-chartSeconds = (arrangementSeconds − chartAnchorSeconds) × rateFactor
-             + fileStartOffsetSeconds
-             + visualOffsetMs / 1000.0
-```
-
-**Calibration routine (ship this in Milestone 4, before any visual polish).** Emit a click through the output, have the user clap or sing a staccato note on it, detect the onset through the *real* signal chain, compare its timestamp against the click's known chart time, store the difference as the default `visualOffsetMs`. This measures the entire actual chain end to end.
-
-**Never derive the offset from Live's "Overall Latency" readout or any ASIO driver-reported number.** Documented case: the UAD Windows driver reported ~29 ms input latency at a 128-sample buffer when the actual measured latency was ~3.3 ms. Cubase forum consensus: "Cubase receives the latency values from the ASIO driver directly. It is not calculating them in any way." Also ignore Live's Driver Error Compensation — it affects recorded-audio alignment only, not playback, and not what the plugin sees.
+> **Removed 2026-08-06.** This section formerly specified an Arrangement-View-only workflow,
+> five APVTS offset parameters (`chartAnchorSeconds`, `fileStartOffsetSeconds`, `rateFactor`,
+> `visualOffsetMs`, `monitoringMode`), a "Capture playhead as chart anchor" button, and a
+> click-and-clap calibration wizard to measure `visualOffsetMs` end to end. None of it was
+> built, and none of it is needed: with the app playing the backing track itself there is no
+> second timeline to anchor against and no unmodelled host latency to trim out.
+>
+> **One lesson from it is worth keeping.** *Never derive a latency offset from a driver-reported
+> number.* Documented case: the UAD Windows driver reported ~29 ms input latency at a
+> 128-sample buffer when the actual measured latency was ~3.3 ms. If a calibration trim is
+> ever needed, measure the real chain — do not ask the driver.
 
 **Chart loading.** `FileChooser::launchAsync(flags, callback)` only — `JUCE_MODAL_LOOPS_PERMITTED` is 0 in plugin builds, so `browseForFileToOpen()` is not even *declared* and calling it is a compile error. **Hold the `FileChooser` as a member `std::unique_ptr`, not a stack local** — otherwise the dialog silently never appears, with no error message. This is the most-reported cause of "launchAsync does nothing."
 
@@ -739,12 +725,12 @@ This converts the entire analysis latency from an **alignment error** into a **f
 
 ### Latency budget — real numbers
 
-Host: 48 kHz, 128-sample ASIO buffer. Internal: 16 kHz, 1024-sample window, 128-sample hop.
+Device: 48 kHz, 128-sample ASIO buffer. Internal: 16 kHz, 1024-sample window, 128-sample hop.
 
 | Stage | ms | Controllable? |
 |---|---|---|
 | Mic → Apollo ADC → ASIO input @128/48k | ~4.0 (measure — see risks) | No |
-| Live buffer → `processBlock` | 0 (same block) | — |
+| Device buffer → `processBlock` | 0 (same block) | — |
 | Anti-alias FIR group delay (63 taps @48k) | 0.65 | Marginally |
 | **Analysis window → centre (1024 @16 kHz)** | **32.0** | **Yes — window length** |
 | 3-tap median (1 hop) | 8.0 | Yes |
@@ -980,7 +966,7 @@ Install UltraSinger (https://github.com/rakuri255/UltraSinger) in a throwaway ve
 
 ### M1 — JUCE Standalone: mic in, pitch out, real feedback
 **Effort: one weekend (~12 h).**
-Build: CMake + JUCE 9 submodule; `FORMATS VST3 Standalone`; the full audio chain (HPF → resample to 16 kHz → `AbstractFifo` → worker thread → MPM/NSDF → gates → median → 1-Euro); `VBlankAttachment` render; a single fixed horizontal target lane you can set by note name; live dot + trail + cents readout + clarity meter; **`theme.json` hot-reload**.
+Build: CMake + JUCE 9 submodule; `FORMATS Standalone`; the full audio chain (HPF → resample to 16 kHz → `AbstractFifo` → worker thread → MPM/NSDF → gates → median → 1-Euro); `VBlankAttachment` render; a single fixed horizontal target lane you can set by note name; live dot + trail + cents readout + clarity meter; **`theme.json` hot-reload**.
 **Done:** launch the standalone, sing a scale against a drone, and see a stable pitch dot with cents error. A/B the detector against Ableton's own Tuner on sustained notes and confirm agreement within ~10 cents.
 **You are getting real pedagogical feedback here, on day two.**
 
@@ -994,11 +980,14 @@ Build: the Python CLI with cached stages; SwiftF0 extraction; **your own note se
 Build: chart loader (`juce::JSON`, async parse, atomic swap); the highway renderer (§7 geometry, dual-horizon auto-zoom, `setBufferedToImage` static layers); octave-folded trace; backing-track playback via `juce::AudioTransportSource`; chart-informed τ range constraint wired to the upcoming note.
 **Done: you sing a complete song against a real scrolling chart with real live feedback.** This is the moment the project becomes a thing you use rather than a thing you build. Everything after this is refinement.
 
-### M4 — VST3 target + Ableton sync + calibration
-**Effort: 2–3 evenings (~9 h).**
-Build: `AudioPlayHead::getPosition()` branch with explicit `std::optional` handling and first-block-after-transport-change repair; the seqlock; the five offset parameters; "Capture playhead" button; **the click-and-clap calibration wizard**; `getStateInformation`/`setStateInformation` via APVTS with `songId` as a non-parameter ValueTree property; `PropertiesFile` for the library root.
-**Done:** the plugin loads on the mic track in Live 11 Arrangement View, the highway scrolls locked to the transport across a stop/start/seek/loop, and the calibration wizard produces a `visualOffsetMs` that makes the trace sit on the note.
-**Development notes:** set the VS `_VST3` target's Debugging → Command to `Live.exe`; be aware crashes during scanning happen in `Ableton Plugin Scanner.exe`, a separate process; Alt+click Rescan in Preferences → Plug-Ins forces a full re-scan; **verify the `.vst3` file timestamp actually changed** before debugging anything.
+### ~~M4 — VST3 target + Ableton sync + calibration~~ — **CANCELLED 2026-08-06**
+
+Never started, and now will not be. See the note at the top of this document. The two pieces
+of it that turned out to be needed anyway were built elsewhere: `PropertiesFile` for the
+library root landed with `app/AppSettings` in M6+, and `getStateInformation` /
+`setStateInformation` via APVTS is in `AudioEngine.cpp`. Everything else — the playhead
+branch, the seqlock, the five offset parameters, the "Capture playhead" button and the
+calibration wizard — is gone.
 
 ### M5 — Lyrics end to end
 **Effort: one weekend (~12 h).**
@@ -1009,6 +998,30 @@ Build: `stable-ts align()` stage; ASR fallback with your own RMS-VAD chunking; p
 **Effort: one weekend (~14 h).**
 Build: the two-threshold ramp with time integration; the three tolerance presets; 200 ms live / 400 ms review medians; phrase pass/fail at 0.45 excluding chart-unvoiced ticks; the post-take review screen (note blobs + instantaneous curve + ghost contour + per-note table + octave histogram + interval error grouping); **feedback fading at 67%**; take recording to disk so review survives a restart.
 **Done:** you finish a song, see a review screen that tells you something a voice teacher would say out loud, and can loop the worst phrase in one click. Fading mode hides the trace on ~1 phrase in 3.
+
+**Status (2026-08-05): mostly built.** `src/score/TakeScorer.{h,cpp}` implements the ramp, the time integration, the 200 ms trailing median, phrase pass/fail at 0.45 and the interval grouping; `src/ui/ReviewOverlayComponent` is the review screen; `src/audio/TakeRecorder` writes takes to `songs/<id>/takes/` with a JSON sidecar. Sung notes are recoloured on the highway by accuracy once they finish. 59 checks in `vt_score_tests` plus 4 pixel checks in `vt_render_tests`.
+
+**Deliberately NOT done yet, and why:**
+- **Feedback fading at 67%.** The evidence for it is strong but it is a behaviour that hides information from the singer, and it should not be switched on before the scoring it depends on has been trusted by ear for a while. It is the next thing to build here.
+- **The Melodyne-style per-note blob view and the per-note table.** The review currently reports at phrase and interval granularity. Per-note detail needs the 400 ms CENTRED median (offline, so centring is free) rather than the 200 ms trailing one the live path uses — a different pass over retained per-frame data, which nothing keeps yet.
+- **The three tolerance presets** as a menu. `tFullCents` / `tZeroCents` are live in `theme.json` and in the APVTS, so all three presets are reachable; there is no picker for them.
+
+### M6+ — Exercises, chart editing, monitor level (not in the original plan)
+Added 2026-08-05, alongside M6.
+
+- **`src/exercise/ExerciseLibrary`** generates scales, arpeggios, interval drills and long tones **as chart JSON**, parsed by the ordinary `Chart::parse`. That is the load-bearing decision: the highway, auto-zoom, octave-folded trace, lyric strip, τ-range constraint and the whole of `TakeScorer` work on a warm-up unchanged, and a warm-up's numbers are directly comparable with a song's. A parallel "exercise mode" with its own renderer and scoring would have doubled the surface area of every later change and drifted.
+  `ExerciseAudio` renders the metronome onto the backing deck and the pitch guide onto the **reference** deck, so the existing Guide toggle silences the reference pitch while keeping the tempo. Glides and sirens are deliberately absent: a continuous glide has no target pitch at any instant, so it cannot be scored on the two-threshold ramp, and an unscoreable bar teaches the singer that green means nothing. Octave *leaps* give the same range work and are scoreable.
+
+  **Three changes on 2026-08-05, from singing them:**
+  - **A starting reference pitch**, struck before the count-in and rendered onto the **click** deck rather than the guide deck. Silencing the running guide is how the singer tests their own ear; being told what key to start in is the premise, not a crutch — every teacher plays the note before counting you in. On the guide deck, "test my ear on this scale" and "don't tell me what note to start on" would have been the same request.
+  - **Both pitched sounds are a synthesised piano**: twelve slightly inharmonic partials (`f(n) = n·f₀·√(1 + Bn²)`, B = 4.5e-4), each decaying faster than the one below it, over a 4 ms attack, with the 8th partial nulled by hammer position. Not realism for its own sake — a piano is what singers have pitched against for two centuries, and the *decay* is the pedagogy: a steady tone becomes a drone the singer stops hearing, where a struck note arrives, places the pitch, and gets out of the way. Notes longer than the decay are re-struck every three beats, as an accompanist would, so the eight-beat long tone still has a reference at the end where it is hardest to hold. Rendered with one rotating phasor per partial rather than `std::sin` per sample: a two-minute exercise is ~10⁸ sines, which is a visible freeze on the message thread for something the user reached by picking a menu item.
+  - **Length is a target duration, not a repeat count** (`kShortSeconds` / `kMediumSeconds` / `kLongSeconds`, remembered in `AppSettings`), because one "repeat" is five seconds of a five-note run and fifty of the interval drill. The definition's own repeat count survives as a *floor* — one pass of all twelve intervals has to happen whatever length was asked for. Transposing exercises now walk up to a turning point and back down as a triangle, bounded by the singable headroom above the pattern, an octave of climb, and half the repeat count. Ninety seconds of five-note runs is 20-odd repetitions, and climbing one semitone each would have run three octaves off the top of the voice — at which point the range clamp silently drops the whole warm-up into a key nobody chose.
+- **Chart editing** (`ui/ChartEditPanelComponent`, `chart/ChartWriter`) is a deliberate narrowing of the "lyrics auto-only, zero manual correction" decision — not a reversal of it. That decision was right for the bulk of the work (hand-charting 21 songs is what kills projects like this), but §4's own numbers say the output is not always right: ~30% word error on sung vocals, and an F-measure target of 0.70 for the segmenter. The editor fixes only the three defects automatic charting actually produces — a wrong word (with phrase-level re-flow), a note an octave out, and a note slightly early or long. No piano roll, no drag-and-drop, no multi-select; anything more elaborate belongs in the UltraStar sidecar and a real editor.
+  `Chart` gains a narrow mutation API. It is safe for the reason §5's threading note already gives — nothing outside the message thread holds a pointer into a Chart, and the one value the worker needs is re-read from an atomic every frame — and every edit function preserves the sorted and NON-OVERLAPPING invariants rather than trusting the caller. Because an edit can re-sort, note indices are not stable across edits; hold the `id`.
+  `ChartWriter` re-reads the file and merges, so no unparsed field is lost. This matters more than it looks: a writer that serialised only the fields the C++ side reads would delete `$schema`, the whole `timing` block, `referenceAudioSha1`, the generator metadata and the contour the first time a user corrected one word, and the damage would not surface until the pipeline next ran.
+- **`app/AppSettings`** finally implements the `PropertiesFile` §3 asks for: the song library root, the remembered chooser folders, and the monitor level. The library root resolves as saved value → the repo's `songs/` found by walking up from the executable → `%APPDATA%/VocalTrainer/songs`, mirroring `_default_library()` in the Python CLI so both ends agree on where songs live with no path in either source.
+- **Toolbar** (2026-08-05). Chart mode had reached fourteen visible controls across two rows, three of which did nothing there. Three rules, in order of how much they bought: (1) controls that do not apply are **hidden, not disabled** — the free-sing Target and Free Sing go away in chart mode, because a permanently greyed control is a permanent question about something that is not available at all; (2) the two level **sliders** move behind a `Levels` call-out, since they are the widest controls in the app and are touched once a session, not once a phrase; (3) between-takes tools (`Add song...`, `Edit chart`, `Edit theme...`) move into one `...` menu. What is left fits on one row above ~700 px of window width, which is worth `controlsRow2Height` of highway on every frame. Hiding Free Sing forced the matching change in `AudioEngine`: a loaded chart's target now takes precedence over the Free Sing flag when constraining the τ search, so a toggle left on from an earlier session cannot silently disable octave-error protection with nothing on screen to explain the jumping trace.
+- **Monitor level.** The mic-to-output path is now a ramped gain rather than a clear(), capped at **+6 dB**. Not higher on purpose: this is a live path from a microphone to a speaker, and a monitor control with a lot of makeup gain is a feedback machine with a friendly label. Ramped per block because a step from 0 to the monitor gain is an audible click on every toggle.
 
 **Total to a genuinely useful tool: roughly 3 weekends plus 6 evenings (~70 h).** You are singing against real feedback at the end of hour 12 and against a real chart at the end of hour 34.
 
@@ -1021,34 +1034,33 @@ Build: the two-threshold ramp with time integration; the three tolerance presets
 | Question | Why it matters | If the answer is bad |
 |---|---|---|
 | ~~**Is there an NVIDIA GPU in this machine, and how much VRAM?**~~ **ANSWERED 2026-08-04: RTX 3080 Ti Laptop, 16 GB.** | Sets offline runtime: separation and `large-v3` alignment go from ~3 min to ~40 min per song without CUDA. | The fast column applies. Measured 16 s to separate a 30 s clip — see §11.11. |
-| **Which Live 11 edition — Intro, Standard, or Suite?** | Only affects whether Max for Live was ever an option. Since M4L is rejected, **this is now informational only.** VST3 loads on all editions. | No impact on the plan. |
 | **Can you obtain real isolated vocal stems, or must everything be separated?** | A genuine stem drops downstream word error from ~21% to ~14% and eliminates ~2 min/song of runtime. | Separation stays in the pipeline; expect slightly worse charts and budget more manual fixups. |
 | **What is your actual vocal range, lowest comfortable note?** | Sets the analysis window and therefore the latency budget. If your floor is G2 (98 Hz) rather than E2 (82 Hz), the window can shrink ~20% for free. | Keep 1024 @16 kHz; costs ~10 ms of feedback delay you would not otherwise pay. |
 | **Is ASIO Link Pro currently in the signal path, and is it stable?** | It adds its own buffering and its own latency reporting, changing the calibration constant. Existing project memory notes it is installed and that startup order matters. | Remove it from the path for this project — the recommended architecture does not need it. |
 | **Is the mic input 1 issue on the Apollo resolved?** | An open hardware/routing fault will look exactly like bad pitch tracking and will send you debugging the wrong layer. | **Resolve this before Milestone 1.** Do not tune a detector against a broken input. |
-| **One monitor or two, and what Windows display scaling?** | Live does not do per-monitor high-DPI-aware VST3 scaling; dragging a plugin window between differently-scaled monitors produces a wrongly-sized window. | Design the UI to look right at 100% scaling, keep it on one monitor, disable "Auto-Scale Plug-In Window". |
+| **One monitor or two, and what Windows display scaling?** | The highway geometry is tuned in pixels, so display scaling changes how much song is on screen. | Design the UI to look right at 100% scaling. |
 | **Do you want a library, or one song working beautifully?** | A library shifts weight onto pipeline robustness and chart-management UI. | Milestone plan assumes one-to-three songs; add a library browser only after M6. |
 
 ### Technical risks, ranked by expected damage
 
 1. **Octave errors are the #1 technical risk for a singing trainer**, because a wrong-octave reading looks like catastrophic failure even when the tracker is 99% correct. YIN fails *low* (subharmonic lock on strong chest voice); MPM/NSDF fails *high*. **Mitigations, all three, not one:** the chart-informed ±1-octave τ constraint, key-maxima picking at k=0.90 rather than global max, and the 3-tap median. Verify explicitly on falsetto and on the bottom of your range in M1.
 2. **Vibrato will be scored as error** if instantaneous cents drives the verdict. A well-trained singer with 100-cent peak-to-peak vibrato would be told they are constantly out of tune — pedagogically destructive, and would teach vibrato suppression. §6's median-based scoring is the mitigation; do not shortcut it.
-3. **Session View silently produces a completely wrong highway.** The playhead reports global arrangement time regardless of what Session clips are doing. Design for Arrangement View, document it, and **fail loudly rather than drift** — e.g. if `isPlaying` is true but the chart position is outside the chart's time range, show a banner rather than scrolling into nothing.
-4. **The `Optional`-unwrapping bug produces symptoms that look exactly like a host bug.** `if (auto x = pos->getTimeInSamples())` evaluates false at sample 0 — precisely at song start, precisely where a sync bug is most visible and most likely to be misattributed to Ableton. Use explicit `std::optional` and `.has_value()`.
+3. ~~**Session View silently produces a completely wrong highway.**~~ Retired with the VST3 — there is no host timeline to misread.
+4. **Unwrapping an `Optional` with `if (auto x = ...)` is false at zero.** Retired in its original form (it was about `getTimeInSamples()` at sample 0), but the general trap is live anywhere a time or index can legitimately be 0: test `.has_value()` explicitly, never truthiness. Song start is exactly where such a bug is most visible and least likely to be suspected.
 5. **Vibrato-driven chart fragmentation in the offline segmenter.** SwiftF0's default `split_semitone_threshold=0.8` is *narrower* than operatic vibrato excursion; a single sustained note explodes into a dozen alternating events. Requires wider threshold **and** hysteresis **and** median filtering together.
 6. **Whisper deletes non-lexical vocables and backing vocals** regardless of separation quality — exactly the sustained held notes the highway most wants to show. The note→syllable assignment must tolerate `syllable: null`.
-7. **Live 11 caches plugin scans aggressively.** A rebuilt plugin can appear not to update at all. Alt+click Rescan, and confirm the `.vst3` file timestamp actually changed before debugging anything else.
+7. ~~**Live 11 caches plugin scans aggressively.**~~ Retired with the VST3 — there is no scan cache, and the built `.exe` is what runs.
 8. **Direct2D can be slower than the software renderer** on machines with integrated-only graphics and no dedicated VRAM — JUCE warns about this explicitly. Test on the actual machine early; escape hatch is `JUCE_DIRECT2D=0`, **not** OpenGL.
-9. **The 44.1 vs 48 kHz resampling trap.** If the frequency conversion ever uses the host rate instead of the actual 16000 internal rate, every reading is off by 145 cents (44.1/48 ratio) — enormous and obvious, but easy to introduce during a refactor. Add a unit test: feed a synthesised 440 Hz sine at both 44100 and 48000 and assert the detector returns 440 ± 2 cents.
+9. **The 44.1 vs 48 kHz resampling trap.** If the frequency conversion ever uses the device rate instead of the actual 16000 internal rate, every reading is off by 145 cents (44.1/48 ratio) — enormous and obvious, but easy to introduce during a refactor. Add a unit test: feed a synthesised 440 Hz sine at both 44100 and 48000 and assert the detector returns 440 ± 2 cents.
 10. **Monitor bleed corrupts the pitch track.** If the user sings along to the reference through speakers, the tracker locks onto the backing vocal, not the user. **Headphones are effectively mandatory** — state this in the UI on first run.
-11. **Live calls `prepareToPlay()` repeatedly on VST3**, unlike AU where it fires once. Any state reset there fires at unpredictable times mid-session.
+11. **`prepareToPlay()` runs again on every device, rate or block-size change**, all of which the singer can trigger from Audio Settings mid-session. Any state reset there fires at unpredictable times. Keep it idempotent, and keep the free-running sample counter out of it.
 12. **Scope creep on the game layer** is the most likely failure mode for a solo hobbyist. Combos, streaks, star power, particle effects and menus are infinitely tunable and pedagogically worthless. Ship M6 and then **actually practise for two weeks before adding anything.**
 13. **Copyright.** Offline analysis of commercial recordings plus separated stems is fine for private study and a grey area for anything else. UltraSinger's own README asks users to process only Creative Commons material. Keep the pipeline strictly local; **do not build chart sharing or distribution features.**
 
 ### Genuinely open, resolvable only by testing
 
 - **Does a 64 ms window with the highway time-shifted actually feel attached while singing?** Theory says yes. Build a slider on window length in M1 and settle it in 30 minutes — before any UI work.
-- **What input latency does the Apollo actually deliver on this Windows 11 machine at 128 samples in Live 11?** Published Apollo-on-Windows figures range from 3.4 ms to a driver-reported 29 ms that was actually 3.3 ms. Measure with a physical loopback: output to input, record a click, count samples. Everything in the calibration design depends on this number, and no readout can be trusted.
+- **What input latency does the Apollo actually deliver on this Windows 11 machine at 128 samples?** Published Apollo-on-Windows figures range from 3.4 ms to a driver-reported 29 ms that was actually 3.3 ms. Measure with a physical loopback: output to input, record a click, count samples. Everything in the calibration design depends on this number, and no readout can be trusted.
 - **Is the MPM/NSDF detector good enough at ≤25 cent tolerance on this specific voice through this specific mic?** If not, Cycfi Q (BSL-1.0, https://github.com/cycfi/q) drops in behind a one-function interface as a second opinion. Do not pre-emptively add it.
 - **Are `stable-ts` word timings accurate enough on melismatic singing to need zero manual correction?** DECISION 3 depends on the answer. Testable immediately in M5 and worth running early.
 - **Is the 67% reduced-feedback result transferable from discrete motor tasks to continuous singing?** The guidance-hypothesis literature is almost entirely discrete-trial. Make the fade rate a `theme.json` parameter and treat 67% as a starting guess.
@@ -1058,20 +1070,19 @@ Build: the two-threshold ramp with time integration; the three tolerance presets
 
 ## 10. LICENSE SUMMARY
 
-### Shipped in the plugin binary
+### Shipped in the app binary
 
 | Dependency | Version | License | Notes |
 |---|---|---|---|
 | **JUCE** | 9.0.0 (2026-07-21) | **AGPLv3 OR commercial** | ⚠️ Dual-licensed. **Take the free "Starter" tier** — perpetual, $0, covers revenue/funding up to **$20,000/yr**, **no splash-screen requirement** (dropped in JUCE 8). Requires registering a juce.com account and accepting the JUCE 9 EULA — an unregistered `git clone` is AGPL by default. https://juce.com/legal/juce-9-licence/ |
-| VST3 SDK | 3.8.0 (bundled in JUCE, at `modules/juce_audio_processors_headless/format_types/VST3_SDK/`) | **MIT** | Steinberg relicensed VST3 to MIT in Oct 2025 (VST 3.8.0). No separate download, no Steinberg agreement, no fee. `juce_set_vst3_sdk_path` is optional. Contrast VST2, which still requires an unobtainable SDK. |
 | lunasvg | bundled (JUCE 9 dep) | MIT | New in JUCE 9's SVG parser. No obligation. |
-| **ASIO SDK** | bundled in JUCE since 8.0.11 | ⚠️ **GPLv3 or Steinberg proprietary** | **Only compiled when `JUCE_ASIO=1`, i.e. the Standalone target.** The VST3 never touches it — Live owns the device. For a personal, undistributed tool, GPLv3 obligations never trigger (no distribution = no copyleft). **If you ever distribute the Standalone closed-source**, either set `JUCE_ASIO=0` (falls back to WASAPI) or obtain Steinberg's proprietary ASIO licence. |
+| **ASIO SDK** | bundled in JUCE since 8.0.11 | ⚠️ **GPLv3 or Steinberg proprietary** | **Only compiled when `JUCE_ASIO=1`** (`-DVT_ENABLE_ASIO=ON`, default OFF). For a personal, undistributed tool, GPLv3 obligations never trigger (no distribution = no copyleft). **If you ever distribute closed-source**, either leave it OFF (JUCE falls back to WASAPI) or obtain Steinberg's proprietary ASIO licence. This is the project's only copyleft edge. |
 | MPM / NSDF pitch detector | — | **Your own code** | Written from McLeod & Wyvill (2005), referencing `sevagh/pitch-detection` (**MIT**). Reading and adapting MIT code is unambiguously safe. |
 | 1-Euro filter | — | **Your own code** | ~30 lines written from the CHI 2012 paper. Sidesteps any vendored-implementation licence question entirely. |
 | Okabe-Ito palette | — | n/a (facts) | Hex values are not copyrightable. |
 | Scoring constants | — | n/a (facts) | Tolerance numbers from Performous/YARG/USDX are facts and freely reimplementable. **Do not paste their code.** |
 
-### Offline pipeline only — never linked into the plugin
+### Offline pipeline only — never linked into the app
 
 | Package | Version | License |
 |---|---|---|
@@ -1081,7 +1092,7 @@ Build: the two-threshold ramp with time integration; the three tolerance presets
 | `stable-ts` | 2.19.1 | MIT |
 | `openai-whisper` (stable-ts dep) | ≤20250625 | MIT |
 | `whisperx` (fallback only) | 3.8.6 | ⚠️ **BSD variant — verify at the repo before relying on it.** Also pulls `pyannote-audio`, whose gated models require accepting HuggingFace terms. |
-| `pyphen` | 0.17.2 | ⚠️ **Tri-licensed GPL-2.0+ / LGPL-2.1+ / MPL-1.1.** Choose LGPL or MPL. Offline-only, so no contamination path to the plugin. |
+| `pyphen` | 0.17.2 | ⚠️ **Tri-licensed GPL-2.0+ / LGPL-2.1+ / MPL-1.1.** Choose LGPL or MPL. Offline-only, so no contamination path to the app. |
 | `cmudict` | 1.1.3 | BSD-style (CMU), permissive |
 | `librosa` | 0.11.0 | ISC |
 | `pretty-midi` | 0.2.11.post0 | MIT |
@@ -1096,7 +1107,7 @@ Build: the two-threshold ramp with time integration; the three tolerance presets
 
 | Project | License | Verdict |
 |---|---|---|
-| **aubio** | ⚠️ **GPL-3.0-or-later** | **The #1 practical contamination risk** — best docs, easiest API, most tutorials, and it would force the entire plugin to GPLv3 and push you off JUCE's commercial Starter tier onto AGPLv3. Read for education only. |
+| **aubio** | ⚠️ **GPL-3.0-or-later** | **The #1 practical contamination risk** — best docs, easiest API, most tutorials, and it would force the entire app to GPLv3 and push you off JUCE's commercial Starter tier onto AGPLv3. Read for education only. |
 | **pYIN / Vamp (Mauch, QMUL)** | ⚠️ GPL-2.0-or-later | Same analysis. GPL-2.0-**only** code is additionally incompatible with GPL-3 dependencies. |
 | **Essentia** | ⚠️ AGPL-3.0 | Strongest copyleft of the set. Avoid entirely; also far too heavy for the audio thread. |
 | **madmom** | ⚠️ **Non-commercial restricted** + won't build on modern Windows | **Do not use.** Port `crepe_notes`' algorithm instead of taking the dependency. |
@@ -1112,7 +1123,7 @@ Build: the two-threshold ramp with time integration; the three tolerance presets
 
 ### Bottom line
 
-**There is no licensing blocker.** The plugin ships under JUCE's free commercial Starter tier with an MIT VST3 SDK, your own MPM implementation, and your own 1-Euro filter — zero copyleft in the binary. The one live copyleft edge is the ASIO SDK in the Standalone target, which matters only on distribution and is trivially avoided by `JUCE_ASIO=0`. Every GPL/AGPL/non-commercial component in the ecosystem lives in the offline Python tool, which is a separate process that never links against the plugin.
+**There is no licensing blocker.** The app ships under JUCE's free commercial Starter tier with your own MPM implementation and your own 1-Euro filter — zero copyleft in the binary. The one live copyleft edge is the ASIO SDK, which matters only on distribution and is trivially avoided by leaving `VT_ENABLE_ASIO` OFF. Every GPL/AGPL/non-commercial component in the ecosystem lives in the offline Python tool, which is a separate process that never links against the app.
 
 **Record this decision explicitly in the repo** (`LICENSING.md`), so a future contributor — or a future you at 1 a.m. — does not paste GPL Pascal from USDX or link `aubio` "just for the high-pass filter" and silently relicense the project.
 ---
@@ -1173,14 +1184,12 @@ set by hand. Guessing from a solo vocal is worse than assuming 440.
 Section 8 and section 9 assume Visual Studio and a GPU question. Both resolved:
 Visual Studio **Build Tools** 2022 (MSVC 19.38, no IDE), CMake 3.30.5 and Ninja were already
 present; so were ffmpeg 8.0.1, git, and Python 3.10-3.13. The machine has an RTX 3080 Ti
-Laptop (16 GB). Ableton is **Live 11 Suite**, so Max for Live *is* available — section 1's
-rejection of M4L stands on the 169 px device-height cap alone, not on licence availability.
+Laptop (16 GB).
 
 M2 needs **no PyTorch**: SwiftF0 is ONNX-only. Torch is deferred to M5 (lyrics).
 
-Because Build Tools ships no IDE, the section 8 M4 advice to attach the Visual Studio debugger
-to `Live.exe` is not available as written. Develop against the Standalone target; if
-step-debugging inside Live becomes necessary, install VS Community then.
+Because Build Tools ships no IDE there is no step-debugger. The app launches in ~2 s from the
+command line, which has been sufficient; install VS Community if that ever changes.
 
 ### 11.4 Corrections already folded into the code
 
@@ -1286,7 +1295,7 @@ because chart time is frozen then while stream time keeps advancing.
 so the deliberate trailing tail from section 5's timestamp-correct rendering is preserved
 rather than being collapsed onto the now-line.
 
-**Rule, because M4 adds a THIRD clock (Ableton's transport):**
+**Rule, because two clocks is already one more than is safe:**
 
 > Stream time and chart time are different numbers. Age and staleness are always measured in
 > STREAM time; screen position is always measured in CHART time. Convert in exactly one
@@ -1477,8 +1486,8 @@ multitracks you already have.
   the model and the source SHA-1. No marker means the stem was supplied by hand, and stage 0
   skips rather than replacing a studio multitrack with a reconstruction of itself.
 - **Cancel is a flag file the CLI polls, not a kill.** The separator is a *grandchild* in
-  another venv; terminating the CLI from the plugin would orphan a multi-minute GPU job with
-  nothing left holding its handle. Only the CLI can stop it properly, so the plugin asks.
+  another venv; terminating the CLI from the app would orphan a multi-minute GPU job with
+  nothing left holding its handle. Only the CLI can stop it properly, so the app asks.
 
 ### 11.12 The app died after the first real import — JUCE's resampler divides by zero (2026-08-04)
 

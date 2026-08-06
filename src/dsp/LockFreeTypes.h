@@ -8,6 +8,11 @@
     the project contract (see DESIGN.md §5, "Thread architecture"). Do not
     redefine these types anywhere else, and do not alter them here.
 
+    TransportSnapshot and TransportSeqlock were part of that contract and have
+    been REMOVED. They existed to carry a plugin host's playhead to the GUI, and
+    the app is standalone only: the backing track owns the clock, and every
+    timestamp is expressed in the free-running device-sample domain below.
+
     Everything in the project lives in namespace vt.
 */
 
@@ -35,30 +40,6 @@ namespace vt
         float   fracMidi = std::numeric_limits<float>::quiet_NaN();  // NaN == unvoiced/rejected
         float   clarity  = 0.0f;   // NSDF peak, 0..1
         float   rmsDb    = -100.0f;
-    };
-
-    struct TransportSnapshot {
-        int64_t timeInSamples = 0;
-        bool    isPlaying = false;
-        double  bpm = 120.0;
-        double  sampleRate = 48000.0;
-    };
-
-    class TransportSeqlock {   // audio thread publishes, GUI thread reads
-        std::atomic<uint32_t> seq { 0 };
-        TransportSnapshot data {};
-    public:
-        void publish (const TransportSnapshot& s) noexcept {
-            seq.fetch_add (1, std::memory_order_release);
-            data = s;
-            seq.fetch_add (1, std::memory_order_release);
-        }
-        bool read (TransportSnapshot& out) const noexcept {
-            const auto a = seq.load (std::memory_order_acquire);
-            if (a & 1u) return false;
-            out = data;
-            return seq.load (std::memory_order_acquire) == a;
-        }
     };
 
 // ==== END OF VERBATIM CONTRACT ===============================================

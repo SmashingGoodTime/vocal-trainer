@@ -45,8 +45,8 @@ public:
 
     //==========================================================================
     /** Allocates every buffer and designs both filters. Call from
-        prepareToPlay(). Safe to call repeatedly (Live calls prepareToPlay()
-        many times over a VST3's lifetime) — it is idempotent apart from
+        prepareToPlay(). Safe to call repeatedly (that runs again on every audio
+        device, rate or block-size change) — it is idempotent apart from
         clearing the analysis state, and it holds no chart/anchor state. */
     void prepare (double hostSampleRate, int maxBlockSize);
 

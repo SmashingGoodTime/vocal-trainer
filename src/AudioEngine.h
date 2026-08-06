@@ -1,14 +1,13 @@
 /*
   ==============================================================================
 
-    PluginProcessor.h
+    AudioEngine.h
     Vocal Trainer — M1
 
-    Three threads, two lock-free SPSC channels, one seqlock, zero locks in the
-    audio path (DESIGN.md §5).
+    Three threads, two lock-free SPSC channels, zero locks in the audio path
+    (DESIGN.md §5).
 
         audio thread  --AudioChunk FIFO-->  worker thread  --PitchEstimate FIFO-->  GUI
-        audio thread  --------------- TransportSeqlock -------------------------->  GUI
 
   ==============================================================================
     DEPENDENCY NOTES — the dsp/ layer is owned by another agent.
@@ -22,10 +21,10 @@
                        stream automatically on a transport discontinuity.
       PitchDetectorMPM NSDF / key-maxima peak picking. Returns fracMidi directly.
       VoicingGate      RMS + noise floor + hysteresis gate + hold, the clarity
-                       gate, AND the 3-tap median. The processor does not
+                       gate, AND the 3-tap median. The engine does not
                        duplicate any of that.
       OneEuroFilter    display smoothing, fixed nominal rate, NaN-aware. Runs on
-                       the message thread (see PluginEditor.cpp for why).
+                       the message thread (see MainComponent.cpp for why).
 
   ==============================================================================
 */
@@ -40,6 +39,7 @@
 #include <memory>
 
 #include "audio/BackingPlayer.h"
+#include "audio/TakeRecorder.h"
 #include "dsp/LockFreeTypes.h"
 #include "dsp/AnalysisChain.h"
 
@@ -47,11 +47,11 @@ namespace vt
 {
 
 //==============================================================================
-class VocalTrainerProcessor final : public juce::AudioProcessor
+class AudioEngine final : public juce::AudioProcessor
 {
 public:
-    VocalTrainerProcessor();
-    ~VocalTrainerProcessor() override;
+    AudioEngine();
+    ~AudioEngine() override;
 
     //== AudioProcessor ========================================================
     void prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock) override;
@@ -83,11 +83,7 @@ public:
         Returns how many were written. Single consumer: only the editor may call this. */
     int drainPitchEstimates (PitchEstimate* dest, int maxItems) noexcept;
 
-    /** Non-blocking seqlock read. Returns false if a write was in progress; just
-        try again next frame. */
-    bool readTransport (TransportSnapshot& out) const noexcept  { return transport.read (out); }
-
-    /** The host sample rate that PitchEstimate::hostSampleAtWindowCentre is
+    /** The device sample rate that PitchEstimate::hostSampleAtWindowCentre is
         expressed in. Valid after the first prepareToPlay(). */
     double getHostSampleRate() const noexcept
     {
@@ -99,14 +95,14 @@ public:
         the FIFO with stale data that would flood the next editor that opens. */
     void setGuiActive (bool shouldBeActive) noexcept;
 
-    /** M3: the Standalone's backing-track player.
+    /** M3: the backing-track player.
 
         Owned here rather than by the editor because it has to render on the
         audio thread, and because playback must survive the editor window being
-        closed and reopened. Inert in the VST3 — Ableton owns playback there. */
+        closed and reopened. */
     BackingPlayer& getBackingPlayer() noexcept { return backingPlayer; }
 
-    /** Whether the microphone is passed through to the OUTPUT (Standalone only).
+    /** Whether the microphone is passed through to the OUTPUT.
 
         DEFAULT OFF, and that is the important part. JUCE's own "Mute audio
         input" checkbox in Audio Settings does something quite different from
@@ -128,6 +124,35 @@ public:
     {
         return monitorMic.load (std::memory_order_relaxed);
     }
+
+    /** How LOUD the monitored microphone is, in dB.
+
+        A level, not just on/off, because how much of your own voice you want in
+        the mix against the backing track is a per-headphone, per-interface
+        judgement that cannot be picked for someone else. Unity is usually far
+        too loud when the Apollo Console is already monitoring.
+
+        Capped just above unity on purpose: this is a live path from a
+        microphone to a speaker, and a monitor control that goes to +24 dB is a
+        feedback machine with a friendly label. Applied as a per-block RAMP, so
+        moving the slider or toggling monitoring never clicks. */
+    void setMonitorGainDb (float db) noexcept
+    {
+        monitorGain.store (juce::Decibels::decibelsToGain (juce::jlimit (kMonitorMinDb,
+                                                                        kMonitorMaxDb, db),
+                                                           kMonitorMinDb),
+                           std::memory_order_relaxed);
+    }
+
+    static constexpr float kMonitorMinDb = -40.0f;
+    static constexpr float kMonitorMaxDb = 6.0f;
+
+    /** M6: records the microphone to disk so a take can be listened back to.
+
+        Owned here rather than by the editor because it has to be fed from the
+        audio thread, and because a recording must not stop just because the
+        window was closed. */
+    TakeRecorder& getTakeRecorder() noexcept { return takeRecorder; }
 
     /** M3: the MIDI note the chart says the singer should be on right now, or a
         negative value when no chart is loaded / no note is active.
@@ -165,10 +190,10 @@ private:
 
     //== Audio thread state (touched ONLY from processBlock) ===================
 
-    /** Free-running host-domain sample counter. Deliberately NOT reset in
-        prepareToPlay(): Live calls prepareToPlay() repeatedly on VST3 during a
-        plugin's lifetime, and resetting the clock mid-session would make every
-        already-queued AudioChunk's timestamp a lie. */
+    /** Free-running device-domain sample counter, and the app's only clock.
+        Deliberately NOT reset in prepareToPlay(): that runs again every time the
+        audio device is changed or reopened, and resetting the clock mid-session
+        would make every already-queued AudioChunk's timestamp a lie. */
     int64_t hostSampleCounter = 0;
 
     juce::AudioBuffer<float> monoScratch;      // preallocated in prepareToPlay
@@ -176,7 +201,6 @@ private:
     int    lastPreparedBlock = 0;
 
     AnalysisChain  analysisChain;
-    TransportSeqlock transport;
 
     //== Worker -> GUI =========================================================
     static constexpr int kEstimateFifoCapacity = 512;   // ~4 s at 125 estimates/s
@@ -191,22 +215,22 @@ private:
     std::atomic<double>  hostSampleRateAtomic { 48000.0 };
     std::atomic<float>   clarityThreshold     { 0.85f };
     std::atomic<float>   chartTargetMidi      { -1.0f };   // <0 == no chart / no active note
-    std::atomic<bool>    monitorMic           { false };   // mic -> output (Standalone)
+    std::atomic<bool>    monitorMic           { false };   // mic -> output
+    std::atomic<float>   monitorGain          { 0.5f };    // linear, ~-6 dB
+
+    /** Gain actually applied to the previous block, so the next one can ramp
+        from it. AUDIO THREAD ONLY — it is the ramp's state, not a setting. */
+    float lastMonitorGain = 0.0f;
 
     BackingPlayer backingPlayer;
+    TakeRecorder  takeRecorder;
     std::atomic<bool>    guiActive            { false };
-
-    /** The free-running counter value at the block whose transport snapshot is
-        currently published. M4 needs this pair to map free-running sample
-        indices (which is what estimates are stamped with) onto arrangement time.
-        TODO(M4): fold this into the offset/anchor mapping. */
-    std::atomic<int64_t> freeRunAtTransportPublish { 0 };
 
     //== Raw parameter pointers (safe to read from any thread) =================
     std::atomic<float>* pTargetNote = nullptr;
     std::atomic<float>* pFreeSing   = nullptr;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocalTrainerProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };
 
 } // namespace vt

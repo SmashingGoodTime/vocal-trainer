@@ -24,8 +24,10 @@
 
 #include <iostream>
 
+#include "app/AppSettings.h"
 #include "chart/Chart.h"
 #include "import/SongImporter.h"
+#include "score/TakeScorer.h"
 #include "ui/ImportOverlayComponent.h"
 #include "ui/NoteHighwayComponent.h"
 #include "ui/Theme.h"
@@ -70,6 +72,7 @@ namespace
         int nonBackground = 0;
         int blueish = 0;     // target note bars
         int greenish = 0;    // in-tune trace / dot
+        int reddish = 0;     // a note scored as out of tune (#D55E00)
         int brightest = 0;
     };
 
@@ -102,6 +105,12 @@ namespace
 
                 if (c.getGreen() > 80 && c.getGreen() > c.getRed() + 40 && c.getGreen() > c.getBlue() + 15)
                     ++s.greenish;
+
+                // Vermilion #D55E00 — the out-of-tune end of the ramp. Strongly
+                // red-dominant with essentially no blue, which nothing else in
+                // the Okabe-Ito palette used on the highway is.
+                if (c.getRed() > 90 && c.getRed() > c.getGreen() + 45 && c.getRed() > c.getBlue() + 70)
+                    ++s.reddish;
             }
 
         return s;
@@ -239,6 +248,129 @@ int main()
            "this is the bug that made the highway look blank");
 
     //==========================================================================
+    // M6: A SUNG NOTE IS RECOLOURED BY ITS ACCURACY.
+    //
+    // Same class of bug as the blank highway, and just as invisible to logic
+    // tests: TakeScorer can compute a perfectly correct accuracy for every note
+    // and the bars can still come out the same blue they always were, because
+    // the recolouring branch is never reached (wrong "finished" comparison, a
+    // null scorer, showScoredNotes off, the halo drawn over the top). The only
+    // way to know the singer can SEE their result is to look at the pixels.
+    //
+    // The check is a DELTA rather than an absolute count: render the same frame
+    // with and without a scorer attached, and require that badly-sung notes have
+    // added vermilion. That cannot pass by accident, and it cannot fail because
+    // of a palette change.
+    //==========================================================================
+    {
+        // Find a playhead position with at least two FINISHED notes just behind
+        // it, so the recoloured bars are inside the 2 s history window.
+        int firstScored = -1;
+        double scoredNow = 0.0;
+
+        for (size_t i = 1; i < notes.size(); ++i)
+        {
+            if (notes[i].endSeconds() - notes[i - 1].startSeconds < 1.8)
+            {
+                firstScored = (int) i - 1;
+                scoredNow = notes[i].endSeconds() + 0.05;
+                break;
+            }
+        }
+
+        if (firstScored < 0)
+        {
+            std::cout << "[SKIP] no two consecutive notes close enough together to "
+                         "test scored colouring" << std::endl;
+        }
+        else
+        {
+            vt::TakeScorer scorer;
+            scorer.setChart (chart.get());
+            scorer.setTolerances (25.0f, 100.0f);
+            scorer.setMedianMs (200);
+
+            // Sung 90 cents sharp throughout: inside tZero, so it earns a little
+            // credit and lands near the out-of-tune end of the ramp rather than
+            // being reported as never sung.
+            for (double t = notes[(size_t) firstScored].startSeconds; t < scoredNow; t += hop)
+            {
+                const auto idx = chart->noteIndexAt (t);
+
+                scorer.feed (t, idx >= 0 ? (float) chart->getNotes()[(size_t) idx].midi + 0.9f
+                                         : std::numeric_limits<float>::quiet_NaN());
+            }
+
+            check (scorer.hasAnyData(), "scored render: the scorer captured the take");
+
+            const auto renderAt = [&] (const vt::TakeScorer* s)
+            {
+                highway.setScorer (s);
+                highway.setClock (streamNow, scoredNow);
+                highway.tickAnimation (0.016);
+
+                juce::Image image (juce::Image::ARGB, 1200, 600, true);
+
+                // The Graphics MUST be destroyed before the pixels are read. The
+                // software renderer holds an Image::BitmapData write lock for its
+                // whole lifetime, and opening a second, read-only BitmapData on
+                // the same image while it is held hands back an empty buffer —
+                // every colour count comes out zero and the highway looks blank
+                // when it is in fact drawn correctly.
+                {
+                    juce::Graphics g (image);
+                    highway.paintEntireComponent (g, false);
+                }
+
+                return analyse (image, background);
+            };
+
+            const auto unscored = renderAt (nullptr);
+            const auto scored   = renderAt (&scorer);
+
+            check (scored.reddish > unscored.reddish + 200,
+                   "scored render: badly sung notes turn vermilion",
+                   juce::String (unscored.reddish) + " -> " + juce::String (scored.reddish)
+                     + " red-dominant px");
+
+            check (scored.blueish < unscored.blueish,
+                   "scored render: those notes stop being drawn as upcoming blue",
+                   juce::String (unscored.blueish) + " -> " + juce::String (scored.blueish)
+                     + " blue-dominant px");
+
+            // And the reverse: a well-sung take must NOT go red. Without this the
+            // check above would still pass if every note were painted vermilion
+            // regardless of how it was actually sung.
+            vt::TakeScorer goodScorer;
+            goodScorer.setChart (chart.get());
+            goodScorer.setTolerances (25.0f, 100.0f);
+            goodScorer.setMedianMs (200);
+
+            for (double t = notes[(size_t) firstScored].startSeconds; t < scoredNow; t += hop)
+            {
+                const auto idx = chart->noteIndexAt (t);
+
+                goodScorer.feed (t, idx >= 0 ? (float) chart->getNotes()[(size_t) idx].midi
+                                             : std::numeric_limits<float>::quiet_NaN());
+            }
+
+            const auto good = renderAt (&goodScorer);
+
+            check (good.reddish < scored.reddish / 4,
+                   "scored render: a well sung take does NOT go red",
+                   juce::String (good.reddish) + " red px vs "
+                     + juce::String (scored.reddish) + " when out of tune");
+
+            check (good.greenish > unscored.greenish,
+                   "scored render: a well sung take adds green",
+                   juce::String (unscored.greenish) + " -> " + juce::String (good.greenish)
+                     + " green-dominant px");
+
+            highway.setScorer (nullptr);
+        }
+    }
+
+    //==========================================================================
     // With no chart, the empty-state message must still be legible.
     //==========================================================================
     highway.setChart (nullptr);
@@ -344,6 +476,42 @@ int main()
                    pythonError.isEmpty() ? juce::String ("import vocalchart succeeded")
                                          : pythonError);
         }
+    }
+
+    //==========================================================================
+    // Finding the SONG LIBRARY, by the same walk-up-from-the-executable trick.
+    //
+    // This is the whole substance of "the Load chart button opens in the song
+    // folder without a hardcoded address": if the detection breaks, the chooser
+    // silently falls back to %APPDATA% and the user has to navigate to their
+    // songs every single time. That failure is invisible in a build log and
+    // annoying forever, which is exactly what a test is for.
+    //==========================================================================
+    {
+        const auto songs = vt::AppSettings::detectRepoSongsDirectory();
+
+        check (songs.isDirectory(),
+               "library: the repo's songs/ folder is discovered from the exe",
+               songs == juce::File() ? juce::String ("NOT FOUND - walked up from ")
+                                         + juce::File::getSpecialLocation (
+                                             juce::File::currentExecutableFile).getFullPathName()
+                                     : songs.getFullPathName());
+
+        check (songs == root.getChildFile ("songs"),
+               "library: and it is the right one",
+               songs.getFullPathName());
+
+        // The documented contract of getSongLibraryRoot() is that it always
+        // returns a directory that exists, whichever of the three branches wins.
+        juce::SharedResourcePointer<vt::AppSettings> settings;
+
+        check (settings->getSongLibraryRoot().isDirectory(),
+               "library: the resolved root always exists",
+               settings->getSongLibraryRoot().getFullPathName());
+
+        check (settings->getLastChartDirectory().isDirectory(),
+               "library: the chooser's start directory always exists",
+               settings->getLastChartDirectory().getFullPathName());
     }
 
     std::cout << "------------------------------------" << std::endl;

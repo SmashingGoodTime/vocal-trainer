@@ -131,6 +131,133 @@ float NoteHighwayComponent::xForTime (double t) const noexcept
     return area.getX() + (float) (fraction * area.getWidth());
 }
 
+double NoteHighwayComponent::timeForX (float x) const noexcept
+{
+    const auto& v = theme.get();
+    const auto area = getLocalBounds().toFloat();
+
+    if (area.getWidth() <= 0.0f)
+        return nowTime;
+
+    const double history   = juce::jmax (0.05f, v.highwayHistorySeconds);
+    const double lookahead = juce::jmax (0.05f, v.highwayLookaheadSeconds);
+    const double span      = history + lookahead;
+
+    const double fraction = (double) (x - area.getX()) / (double) area.getWidth();
+    return nowTime + fraction * span - history;
+}
+
+float NoteHighwayComponent::midiForY (float y) const noexcept
+{
+    const auto area = getLocalBounds().toFloat();
+
+    if (area.getHeight() <= 0.0f)
+        return viewLowMidi;
+
+    const auto span = juce::jmax (1.0f, viewHighMidi - viewLowMidi);
+    return viewLowMidi + ((area.getBottom() - y) / area.getHeight()) * span;
+}
+
+//==============================================================================
+void NoteHighwayComponent::setEditMode (bool shouldEdit)
+{
+    if (editMode == shouldEdit)
+        return;
+
+    editMode = shouldEdit;
+
+    // Off by default and restored to that: the highway is something you sing at,
+    // and swallowing clicks during a take would be a surprise every time.
+    setInterceptsMouseClicks (editMode, false);
+    setMouseCursor (editMode ? juce::MouseCursor::PointingHandCursor
+                             : juce::MouseCursor::NormalCursor);
+
+    if (! editMode)
+        selectedNoteId = -1;
+
+    repaint();
+}
+
+void NoteHighwayComponent::setSelectedNoteId (int noteId) noexcept
+{
+    if (selectedNoteId == noteId)
+        return;
+
+    selectedNoteId = noteId;
+    repaint();
+}
+
+int NoteHighwayComponent::noteIndexNear (juce::Point<float> position) const noexcept
+{
+    if (chart == nullptr || chart->isEmpty())
+        return -1;
+
+    const auto& v = theme.get();
+
+    const double t0 = nowTime - v.highwayHistorySeconds;
+    const double t1 = nowTime + v.highwayLookaheadSeconds;
+
+    int first = 0, last = 0;
+
+    if (! chart->notesOverlapping (t0, t1, first, last))
+        return -1;
+
+    const auto& notes = chart->getNotes();
+
+    int best = -1;
+    float bestDistance = std::numeric_limits<float>::max();
+
+    for (int i = first; i < last; ++i)
+    {
+        const auto& n = notes[(size_t) i];
+
+        const auto x0 = xForTime (n.startSeconds);
+        const auto x1 = xForTime (n.endSeconds());
+        const auto cy = yForMidi ((float) n.midi);
+
+        // Distance to the bar as a rectangle, with a generous vertical reach.
+        const auto dx = position.x < x0 ? x0 - position.x
+                                        : (position.x > x1 ? position.x - x1 : 0.0f);
+        const auto dy = std::abs (position.y - cy);
+
+        const auto distance = dx * 2.0f + dy;    // horizontal misses cost more
+
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            best = i;
+        }
+    }
+
+    // A click a long way from every note is a click on empty space, not a
+    // near-miss on the nearest one.
+    return bestDistance <= 60.0f ? best : -1;
+}
+
+void NoteHighwayComponent::mouseDown (const juce::MouseEvent& e)
+{
+    if (! editMode || onNoteClicked == nullptr)
+        return;
+
+    const auto index = noteIndexNear (e.position);
+
+    onNoteClicked (index >= 0 ? chart->getNotes()[(size_t) index].id : -1);
+}
+
+//==============================================================================
+juce::Colour NoteHighwayComponent::scoredColourFor (const NoteScore& score) const noexcept
+{
+    const auto& v = theme.get();
+
+    if (! score.hasData)
+        return v.noteNotSung;
+
+    // Same Oklab ramp and the same two endpoint colours as the live trace, so
+    // "green" means one thing in this app rather than two.
+    return lerpOklab (v.noteScoredGood, v.noteScoredPoor,
+                      juce::jlimit (0.0f, 1.0f, 1.0f - score.accuracy));
+}
+
 //==============================================================================
 void NoteHighwayComponent::updateZoomTarget() noexcept
 {
@@ -422,8 +549,35 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
         const auto w = juce::jmax (2.0f, x1 - x0);
         const auto active = n.containsTime (nowTime);
 
-        // Partial-credit halo behind the bar.
-        if (v.haloAlpha > 0.0f && haloHeight > barHeight)
+        //--------------------------------------------------------------------
+        // Has this note been SUNG AND FINISHED?
+        //
+        // Only then is it recoloured. While the note is active the singer is
+        // reading the trace against the bar — that geometry is the primary
+        // signal (DESIGN.md section 7) and a bar changing colour underneath the
+        // dot would both compete with it and flicker as the running average
+        // moved. The instant it is over, the geometry has scrolled into history
+        // and the colour is the only thing left to read.
+        //--------------------------------------------------------------------
+        const bool finished = n.endSeconds() <= nowTime;
+
+        const NoteScore* score = nullptr;
+
+        if (v.showScoredNotes && scorer != nullptr && finished && isPitchScored (n.type))
+        {
+            const auto& s = scorer->getNoteScore (i);
+
+            // An unsung note is only reported as such once the take has actually
+            // started. Before that every note is "unsung", and painting the
+            // whole chart grey would be both useless and discouraging.
+            if (s.hasData || scorer->hasAnyData())
+                score = &s;
+        }
+
+        // Partial-credit halo behind the bar. Suppressed on a scored note: its
+        // job is to show where partial credit WOULD be earned, and once the note
+        // is scored the answer is on the bar itself.
+        if (v.haloAlpha > 0.0f && haloHeight > barHeight && score == nullptr)
         {
             g.setColour ((active ? v.targetBarActive : v.targetBarUpcoming).withAlpha (v.haloAlpha));
             g.fillRoundedRectangle (x0, cy - haloHeight * 0.5f, w, haloHeight,
@@ -445,6 +599,51 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
             g.setColour (barColour.withAlpha (v.upcomingBarAlpha * 0.6f));
             g.drawRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
                                     v.noteBarCornerRadiusPx, v.targetBarBorderPx);
+
+            if (n.id == selectedNoteId)
+                paintSelection (g, x0, cy, w, haloHeight);
+
+            continue;
+        }
+
+        if (score != nullptr)
+        {
+            const auto scored = scoredColourFor (*score);
+
+            if (! score->hasData)
+            {
+                // NEVER SUNG. Hollow and grey — visibly a different outcome from
+                // "sung badly", which is solid and vermilion. Conflating the two
+                // is how feedback starts lying: it would report a note the singer
+                // had not reached yet as a note they got wrong.
+                g.setColour (scored.withAlpha (0.75f));
+                g.drawRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
+                                        v.noteBarCornerRadiusPx,
+                                        juce::jmax (1.0f, v.targetBarBorderPx));
+            }
+            else
+            {
+                // The bar is drawn at full length in the accuracy colour, and
+                // the part actually SUNG is filled solid. So a note sung well
+                // but only half way through reads as half-filled green rather
+                // than as either a clean pass or a failure.
+                g.setColour (scored.withAlpha (v.scoredBarAlpha * 0.35f));
+                g.fillRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
+                                        v.noteBarCornerRadiusPx);
+
+                const auto sungWidth = juce::jlimit (0.0f, w, w * score->coverage);
+
+                if (sungWidth > 0.5f)
+                {
+                    g.setColour (scored.withAlpha (v.scoredBarAlpha));
+                    g.fillRoundedRectangle (x0, cy - barHeight * 0.5f, sungWidth, barHeight,
+                                            v.noteBarCornerRadiusPx);
+                }
+            }
+
+            if (n.id == selectedNoteId)
+                paintSelection (g, x0, cy, w, haloHeight);
+
             continue;
         }
 
@@ -458,7 +657,25 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
             g.drawRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
                                     v.noteBarCornerRadiusPx, v.targetBarBorderPx);
         }
+
+        if (n.id == selectedNoteId)
+            paintSelection (g, x0, cy, w, haloHeight);
     }
+}
+
+//==============================================================================
+void NoteHighwayComponent::paintSelection (juce::Graphics& g, float x0, float cy,
+                                           float w, float haloHeight)
+{
+    const auto& v = theme.get();
+
+    // Drawn OUTSIDE the bar rather than over it, so the note's own colour — and
+    // therefore its score — stays readable while it is selected for editing.
+    const auto h = juce::jmax (haloHeight, 10.0f) + 6.0f;
+
+    g.setColour (v.editSelection);
+    g.drawRoundedRectangle (x0 - 3.0f, cy - h * 0.5f, w + 6.0f, h,
+                            v.noteBarCornerRadiusPx + 2.0f, 1.5f);
 }
 
 //==============================================================================

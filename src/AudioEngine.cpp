@@ -1,14 +1,14 @@
 /*
   ==============================================================================
 
-    PluginProcessor.cpp
+    AudioEngine.cpp
     Vocal Trainer — M1
 
   ==============================================================================
 */
 
-#include "PluginProcessor.h"
-#include "PluginEditor.h"
+#include "AudioEngine.h"
+#include "MainComponent.h"
 
 #include "dsp/PitchDetectorMPM.h"
 #include "dsp/VoicingGate.h"
@@ -51,10 +51,10 @@ namespace
     allocation, no locks, no logging, no exceptions. Everything below is either
     a member array or a stack scalar.
 */
-class VocalTrainerProcessor::AnalysisWorker final : public juce::Thread
+class AudioEngine::AnalysisWorker final : public juce::Thread
 {
 public:
-    explicit AnalysisWorker (VocalTrainerProcessor& o)
+    explicit AnalysisWorker (AudioEngine& o)
         : juce::Thread ("Vocal Trainer Analysis"), owner (o)
     {
     }
@@ -139,13 +139,19 @@ private:
         float minHz = kFreeSingMinHz;
         float maxHz = kFreeSingMaxHz;
 
-        // A loaded chart takes precedence over the manual target note: it knows
-        // what the singer should be on at THIS instant, which is the whole point
-        // of the constraint. Falls back to the APVTS note when no chart is
-        // loaded, and to the full range in Free Sing.
+        // A loaded chart takes precedence over the manual target note AND over
+        // Free Sing: it knows what the singer should be on at THIS instant,
+        // which is the whole point of the constraint. Falls back to the APVTS
+        // note when no chart is loaded, and to the full range in Free Sing.
+        //
+        // Free Sing losing to a chart is not an oversight. The editor hides the
+        // toggle in chart mode — it is a free-sing-mode control — and a hidden
+        // toggle left on from a previous session must not be able to switch off
+        // the octave-error constraint on every song from then on, invisibly and
+        // with nothing on screen to explain why the trace jumps an octave.
         const float chartTarget = owner.chartTargetMidi.load (std::memory_order_relaxed);
 
-        if (! freeSing && chartTarget >= 0.0f)
+        if (chartTarget >= 0.0f)
         {
             minHz = midiToHz (chartTarget - 12.0f);
             maxHz = midiToHz (chartTarget + 12.0f);
@@ -236,7 +242,7 @@ private:
     }
 
     //==========================================================================
-    VocalTrainerProcessor& owner;
+    AudioEngine& owner;
 
     PitchDetectorMPM detector;
     VoicingGate      gate;
@@ -258,7 +264,7 @@ private:
 //==============================================================================
 // Parameters
 //==============================================================================
-juce::AudioProcessorValueTreeState::ParameterLayout VocalTrainerProcessor::createParameterLayout()
+juce::AudioProcessorValueTreeState::ParameterLayout AudioEngine::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
@@ -292,30 +298,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout VocalTrainerProcessor::creat
         100.0f,
         juce::AudioParameterFloatAttributes().withLabel ("cents")));
 
-    // TODO(M4): chartAnchorSeconds, fileStartOffsetSeconds, rateFactor,
-    // visualOffsetMs, monitoringMode (DESIGN.md §5 "Transport sync and offset
-    // handling"). They are deliberately absent in M1 — there is no chart and no
-    // transport mapping yet, and shipping unused automatable parameters would
-    // bake them into saved Live sets before their ranges are settled.
-
     return layout;
 }
 
 //==============================================================================
 // Construction
 //==============================================================================
-VocalTrainerProcessor::VocalTrainerProcessor()
+AudioEngine::AudioEngine()
     : juce::AudioProcessor (BusesProperties()
           .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    // NEVER change this. This plugin adds no delay to the signal: processBlock
-    // leaves the buffer untouched. Reporting N > 0 would make Live delay every
-    // other track by N through PDC, add real audible delay to a live-monitored
-    // vocal for zero benefit, interact inconsistently with "Reduced Latency When
-    // Monitoring", and expose us to Live's documented dynamic-latency bugs.
-    // Keeping it at zero also means the host never pre-shifts ppqPosition.
+    // NEVER change this. Nothing here delays the signal — the analysis chain
+    // taps the buffer, it does not sit in front of it — so reporting N > 0 would
+    // make the standalone wrapper add real audible delay to a live-monitored
+    // vocal for zero benefit. The analysis front end compensates its own latency
+    // in the TIMESTAMPS it hands the GUI (AnalysisChain.h), which is where that
+    // correction belongs.
     setLatencySamples (0);
 
     pTargetNote = apvts.getRawParameterValue (pidTargetNote);
@@ -331,7 +331,7 @@ VocalTrainerProcessor::VocalTrainerProcessor()
     worker->startThread (juce::Thread::Priority::highest);
 }
 
-VocalTrainerProcessor::~VocalTrainerProcessor()
+AudioEngine::~AudioEngine()
 {
     if (worker != nullptr)
     {
@@ -349,12 +349,12 @@ VocalTrainerProcessor::~VocalTrainerProcessor()
 //==============================================================================
 // Preparation
 //==============================================================================
-void VocalTrainerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
+void AudioEngine::prepareToPlay (double sampleRate, int maximumExpectedSamplesPerBlock)
 {
-    // Live calls prepareToPlay() REPEATEDLY on VST3 during a plugin's lifetime
-    // (unlike AU, where it fires once). So: cheap, idempotent, and free of any
-    // persistent state. hostSampleCounter, the chart anchor and the calibration
-    // offset all live outside this function on purpose.
+    // Runs again every time the audio device, rate or block size changes, which
+    // the singer can do at any point from Audio Settings. So: cheap, idempotent,
+    // and free of any persistent state. hostSampleCounter, the chart anchor and
+    // the calibration offset all live outside this function on purpose.
     const int block = juce::jmax (64, maximumExpectedSamplesPerBlock);
 
     hostSampleRateAtomic.store (sampleRate, std::memory_order_relaxed);
@@ -365,6 +365,13 @@ void VocalTrainerProcessor::prepareToPlay (double sampleRate, int maximumExpecte
     if (! configurationChanged)
         return;                     // same rate and block size: nothing to do.
 
+    // A rate change mid-recording would append samples at the new rate to a WAV
+    // whose header states the old one, i.e. a take that plays back at the wrong
+    // speed. Closing the file keeps what was captured and keeps it correct;
+    // silently corrupting it would be discovered much later, on playback.
+    if (takeRecorder.isRecording())
+        takeRecorder.stop();
+
     lastPreparedRate  = sampleRate;
     lastPreparedBlock = block;
 
@@ -373,12 +380,12 @@ void VocalTrainerProcessor::prepareToPlay (double sampleRate, int maximumExpecte
 
     analysisChain.prepare (sampleRate, block);   // [DSP-API]
 
-    // Standalone only, but preparing it unconditionally is harmless and keeps
-    // this branch-free — it renders nothing unless a track is loaded AND playing.
+    // Renders nothing unless a track is loaded AND playing, so preparing it
+    // unconditionally costs nothing.
     backingPlayer.prepare (sampleRate, block);
 }
 
-void VocalTrainerProcessor::releaseResources()
+void AudioEngine::releaseResources()
 {
     // Nothing to free: every buffer is sized for the worst case and kept.
     // The worker keeps running; it will simply find the chunk FIFO empty.
@@ -388,7 +395,7 @@ void VocalTrainerProcessor::releaseResources()
     backingPlayer.releaseResources();
 }
 
-bool VocalTrainerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool AudioEngine::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto in  = layouts.getMainInputChannelSet();
     const auto out = layouts.getMainOutputChannelSet();
@@ -405,7 +412,7 @@ bool VocalTrainerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 //==============================================================================
 // Audio thread
 //==============================================================================
-void VocalTrainerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void AudioEngine::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -415,9 +422,10 @@ void VocalTrainerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const int numOut      = juce::jmin (getTotalNumOutputChannels(), numChannels);
 
     //----------------------------------------------------------------------
-    // 1. PASS-THROUGH. JUCE hands processBlock a single buffer used for both
-    //    input and output, so leaving it alone is already bit-exact
-    //    pass-through. Do not "helpfully" copy anything.
+    // 1. JUCE hands processBlock a single buffer used for both input and
+    //    output, so the microphone is already in place and no copy is needed.
+    //    Only the output channels the input does not reach need clearing.
+    //    Do not "helpfully" copy anything.
     //----------------------------------------------------------------------
     for (int ch = numIn; ch < numOut; ++ch)
         buffer.clear (ch, 0, numSamples);
@@ -425,59 +433,11 @@ void VocalTrainerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const int64_t blockStart = hostSampleCounter;
     hostSampleCounter += numSamples;
 
-    //----------------------------------------------------------------------
-    // 2. Read the playhead EXACTLY ONCE and publish it.
-    //
-    //    getPosition() may only be called from processBlock; anywhere else is
-    //    undefined behaviour.
-    //----------------------------------------------------------------------
-    {
-        TransportSnapshot snap;
-        snap.sampleRate    = hostSampleRateAtomic.load (std::memory_order_relaxed);
-        snap.bpm           = 120.0;
-        snap.isPlaying     = false;
-        snap.timeInSamples = blockStart;      // standalone fallback: our own clock
-
-        if (auto* ph = getPlayHead())
-        {
-            if (const auto pos = ph->getPosition())
-            {
-                // EXPLICIT optional handling. NEVER write
-                //     if (auto x = pos->getTimeInSamples())
-                // because that is FALSE at sample 0 — i.e. exactly at song start,
-                // i.e. exactly where a chart-sync bug is most visible and most
-                // likely to be misblamed on Ableton.
-                //
-                // NOTE: JUCE 9's PositionInfo returns juce::Optional, not
-                // std::optional, so it is converted here rather than assigned.
-                const auto rawTs = pos->getTimeInSamples();
-                const std::optional<int64_t> ts = rawTs.hasValue()
-                                                    ? std::optional<int64_t> { *rawTs }
-                                                    : std::nullopt;
-
-                const auto rawBpm = pos->getBpm();
-                const bool playing = pos->getIsPlaying();   // bare bool, not Optional
-
-                snap.isPlaying = playing;
-                snap.bpm       = rawBpm.hasValue() ? *rawBpm : 120.0;
-
-                if (ts.has_value())
-                    snap.timeInSamples = *ts;
-            }
-        }
-
-        // Published just before the snapshot so the GUI can pair arrangement
-        // time with the free-running domain that estimates are stamped in.
-        // TODO(M4): this pair is the input to the chartAnchor mapping.
-        freeRunAtTransportPublish.store (blockStart, std::memory_order_relaxed);
-        transport.publish (snap);
-    }
-
     if (numSamples <= 0 || numIn <= 0)
         return;
 
     //----------------------------------------------------------------------
-    // 3. Sum to mono into the preallocated scratch buffer, then feed the
+    // 2. Sum to mono into the preallocated scratch buffer, then feed the
     //    analysis chain. Sliced, so an over-large block cannot overrun.
     //----------------------------------------------------------------------
     const int capacity = monoScratch.getNumSamples();
@@ -500,50 +460,61 @@ void VocalTrainerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
 
         analysisChain.processBlock (mono, n, blockStart + offset);   // [DSP-API]
+
+        // Recorded from the SAME mono sum the detector just analysed, and BEFORE
+        // the monitor gain and the backing track are applied below. Both halves
+        // of that matter: a take that was not the analysed signal makes "the
+        // score disagrees with what I hear" unresolvable, and a take with the
+        // backing track bled into it is useless for hearing your own pitch.
+        takeRecorder.write (mono, n);
     }
 
     //----------------------------------------------------------------------
-    // 4. Wake the worker. signal() on an already-signalled event is a no-op and
+    // 3. Wake the worker. signal() on an already-signalled event is a no-op and
     //    does not block, so this is safe on the audio thread.
     //----------------------------------------------------------------------
     if (analysisChain.getNumChunksReady() > 0)
         chunkReady.signal();
 
     //----------------------------------------------------------------------
-    // 5. Backing track — STANDALONE ONLY, and strictly AFTER the analysis
-    //    chain has read the input.
+    // 4. Output stage — strictly AFTER the analysis chain has read the input.
     //
     //    The buffer is shared between input and output, so mixing the backing
     //    track in any earlier would feed it straight into the pitch detector
     //    and the tracker would follow the record instead of the singer.
-    //
-    //    In the VST3 this is skipped entirely: Ableton plays the backing track,
-    //    and a plugin that also played it would double it.
     //----------------------------------------------------------------------
-    if (wrapperType == wrapperType_Standalone)
-    {
-        // 5a. MONITORING IS AN OUTPUT DECISION, NOT AN INPUT ONE.
-        //
-        //     The analysis chain has already consumed the mic above, so clearing
-        //     the buffer here silences monitoring WITHOUT touching the pitch
-        //     display. That is the whole point: the singer can stop hearing
-        //     themselves and still see their pitch.
-        //
-        //     (In the VST3, Live owns monitoring and routing, so this is skipped
-        //     and the plugin stays a bit-exact pass-through.)
-        if (! monitorMic.load (std::memory_order_relaxed))
-            buffer.clear();
 
-        // 5b. Backing track and guide vocal go in AFTER the mic is cleared, so
-        //     they are unaffected by the monitor setting.
-        backingPlayer.renderInto (buffer);
-    }
+    // 4a. MONITORING IS AN OUTPUT DECISION, NOT AN INPUT ONE.
+    //
+    //     The analysis chain has already consumed the mic above, so attenuating
+    //     the buffer here changes monitoring WITHOUT touching the pitch display.
+    //     That is the whole point: the singer can turn their own voice down to
+    //     nothing and still see their pitch.
+    //
+    //     RAMPED, not switched. A jump straight from 0 to the monitor gain puts
+    //     a step in the waveform, and a step in a signal already feeding
+    //     headphones is an audible click on every toggle and every slider move.
+    //     One ramp per block is the cheapest fix and the standard one.
+    const auto monitorTarget = monitorMic.load (std::memory_order_relaxed)
+                                 ? monitorGain.load (std::memory_order_relaxed)
+                                 : 0.0f;
+
+    if (juce::approximatelyEqual (monitorTarget, lastMonitorGain))
+        buffer.applyGain (monitorTarget);
+    else
+        buffer.applyGainRamp (0, numSamples, lastMonitorGain, monitorTarget);
+
+    lastMonitorGain = monitorTarget;
+
+    // 4b. Backing track and guide vocal go in AFTER the mic is cleared, so they
+    //     are unaffected by the monitor setting.
+    backingPlayer.renderInto (buffer);
 }
 
 //==============================================================================
 // GUI-facing
 //==============================================================================
-int VocalTrainerProcessor::drainPitchEstimates (PitchEstimate* dest, int maxItems) noexcept
+int AudioEngine::drainPitchEstimates (PitchEstimate* dest, int maxItems) noexcept
 {
     if (dest == nullptr || maxItems <= 0)
         return 0;
@@ -566,7 +537,7 @@ int VocalTrainerProcessor::drainPitchEstimates (PitchEstimate* dest, int maxItem
     return b1 + b2;
 }
 
-void VocalTrainerProcessor::setGuiActive (bool shouldBeActive) noexcept
+void AudioEngine::setGuiActive (bool shouldBeActive) noexcept
 {
     if (shouldBeActive)
     {
@@ -587,13 +558,13 @@ void VocalTrainerProcessor::setGuiActive (bool shouldBeActive) noexcept
 //==============================================================================
 // State
 //==============================================================================
-void VocalTrainerProcessor::getStateInformation (juce::MemoryBlock& destData)
+void AudioEngine::getStateInformation (juce::MemoryBlock& destData)
 {
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary (*xml, destData);
 }
 
-void VocalTrainerProcessor::setStateInformation (const void* data, int sizeInBytes)
+void AudioEngine::setStateInformation (const void* data, int sizeInBytes)
 {
     // setStateInformation can be called on any thread and possibly before the
     // editor exists. Parameters only — never parse a chart synchronously here.
@@ -604,15 +575,17 @@ void VocalTrainerProcessor::setStateInformation (const void* data, int sizeInByt
 }
 
 //==============================================================================
-juce::AudioProcessorEditor* VocalTrainerProcessor::createEditor()
+juce::AudioProcessorEditor* AudioEngine::createEditor()
 {
-    return new VocalTrainerEditor (*this);
+    return new MainComponent (*this);
 }
 
 } // namespace vt
 
 //==============================================================================
+// JUCE's standalone wrapper calls this to build the engine. The name is fixed
+// by juce_audio_plugin_client and cannot be changed.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new vt::VocalTrainerProcessor();
+    return new vt::AudioEngine();
 }
