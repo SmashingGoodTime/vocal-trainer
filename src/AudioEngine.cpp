@@ -568,7 +568,9 @@ void AudioEngine::setStateInformation (const void* data, int sizeInBytes)
 {
     // setStateInformation can be called on any thread and possibly before the
     // editor exists. Parameters only — never parse a chart synchronously here.
-    // TODO(M4): songId as a non-parameter ValueTree property, loaded async.
+    // The loaded song is deliberately not part of this state: it lives in the
+    // PropertiesFile (see AppSettings), which is why there is nothing to load
+    // asynchronously here.
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
