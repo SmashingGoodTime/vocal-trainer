@@ -45,6 +45,30 @@ namespace
         are, and they miss the entry every time. */
     constexpr double kRetryLeadInSeconds = 1.25;
 
+    /** How far the rewind button jumps back. Long enough to clear a phrase and
+        get a run-up at it, short enough that pressing it twice is a normal
+        thing to do rather than a mistake. */
+    constexpr double kRewindSeconds = 5.0;
+
+    /** Loop window used when the Loop button is armed on a chart with no
+        phrases in it — a generated exercise, or a song whose importer produced
+        none. Centred on the playhead rather than starting there: you press Loop
+        because of something you have just sung, and it is behind you. */
+    constexpr double kLoopFallbackBefore = 4.0;
+    constexpr double kLoopFallbackAfter  = 4.0;
+
+    /** Run-up put in front of an AUTO-CHOSEN loop section.
+
+        Not decoration: dropping the playhead on the first note of a phrase
+        gives the singer no time to hear where they are, and they miss the entry
+        on every single repetition — which is the one thing a drill loop must
+        not teach.
+
+        Applied when the region is CHOSEN, not when it is played, so what the
+        transport strip draws is exactly what you hear. A hand-drawn region is
+        left alone: the user drew where they wanted it. */
+    constexpr double kLoopLeadInSeconds = 0.5;
+
     //== Exercise menu item ids ================================================
     // Disjoint ranges rather than one counter, so adding an exercise cannot
     // silently renumber the tempo items.
@@ -66,9 +90,15 @@ namespace
 
     /** Below this the transport does not fit beside the library buttons, so the
         controls split onto two rows. Sized from what is actually placed on the
-        row — 618 px of controls plus margins — with enough slack that a button
-        never lands hard against the window edge. */
-    constexpr int kSingleRowMinWidth = 700;
+        row — 721 px of controls plus margins, counting the rewind and Loop
+        buttons — with enough slack that a button never lands hard against the
+        window edge.
+
+        RECOUNT THIS WHEN A BUTTON IS ADDED. It was 700 for a 618 px row; two
+        more buttons made the row wider than the threshold that was supposed to
+        protect it, and the failure mode is a control clipped off the right-hand
+        edge that the singer only finds out about when they reach for it. */
+    constexpr int kSingleRowMinWidth = 790;
 }
 
 //==============================================================================
@@ -84,6 +114,13 @@ MainComponent::MainComponent (AudioEngine& p)
     addChildComponent (highway);
     addChildComponent (lyricStrip);
     addChildComponent (editPanel);
+
+    // BEFORE the overlays, deliberately. JUCE paints children in the order they
+    // were added, so anything added after importOverlay/reviewOverlay would be
+    // drawn ON TOP of them — a keyboard punched through the middle of the review
+    // screen, and a transport strip you could scrub while a chart was building.
+    addChildComponent (keyboard);
+    addChildComponent (transportBar);
 
     highway.setScorer (&scorer);
 
@@ -262,6 +299,58 @@ MainComponent::MainComponent (AudioEngine& p)
     guideVocalLevel.onValueChange = [this] { pushGuideVocalGain(); };
     levelsPanel.addChildComponent (guideVocalLevel);
 
+    //--------------------------------------------------- latency compensation
+    outputLatencyCaption.setText ("Output", juce::dontSendNotification);
+    outputLatencyCaption.setJustificationType (juce::Justification::centredLeft);
+    latencyPanel.addAndMakeVisible (outputLatencyCaption);
+
+    outputLatency.setRange (0.0, (double) AppSettings::kMaxLatencyMs, 1.0);
+    outputLatency.setTextValueSuffix (" ms");
+    outputLatency.setNumDecimalPlacesToDisplay (0);
+    outputLatency.setValue ((double) settings->getOutputLatencyMs(),
+                            juce::dontSendNotification);
+    outputLatency.setTooltip ("How late the backing track reaches your ears. Raise it "
+                              "until the note you HEAR arrives exactly as the note "
+                              "crosses the now-line. Bluetooth headphones need "
+                              "150-250 ms; a wired interface needs 0.");
+    outputLatency.onValueChange = [this] { pushLatencyOffsets(); };
+    latencyPanel.addAndMakeVisible (outputLatency);
+
+    inputLatencyCaption.setText ("Input", juce::dontSendNotification);
+    inputLatencyCaption.setJustificationType (juce::Justification::centredLeft);
+    latencyPanel.addAndMakeVisible (inputLatencyCaption);
+
+    inputLatency.setRange (0.0, (double) AppSettings::kMaxLatencyMs, 1.0);
+    inputLatency.setTextValueSuffix (" ms");
+    inputLatency.setNumDecimalPlacesToDisplay (0);
+    inputLatency.setValue ((double) settings->getInputLatencyMs(),
+                           juce::dontSendNotification);
+    inputLatency.setTooltip ("How late your voice reaches this app. Affects the mic trace "
+                             "and your score, never the highway. Raise it if you are "
+                             "scored late even after Output is right.");
+    inputLatency.onValueChange = [this] { pushLatencyOffsets(); };
+    latencyPanel.addAndMakeVisible (inputLatency);
+
+    latencyDriverButton.setTooltip ("Fill both in from what the audio driver reports. A "
+                                    "starting point only: the driver knows its own "
+                                    "buffering and nothing about a Bluetooth link, which "
+                                    "is where nearly all of the delay actually is.");
+    latencyDriverButton.onClick = [this] { fillLatencyFromDriver(); };
+    latencyPanel.addAndMakeVisible (latencyDriverButton);
+
+    // Said on the panel rather than only in a tooltip, because it is the thing
+    // that decides whether calibrating is worth the trouble at all.
+    latencyHint.setText ("Bluetooth delay drifts: a fixed offset corrects the "
+                         "average, not the wobble.",
+                         juce::dontSendNotification);
+    latencyHint.setJustificationType (juce::Justification::topLeft);
+    latencyHint.setMinimumHorizontalScale (1.0f);
+    latencyPanel.addAndMakeVisible (latencyHint);
+
+    // Cache the persisted values into seconds before the first vblank can read
+    // them. Nothing is written back that was not already in the file.
+    pushLatencyOffsets();
+
     //--------------------------------------------------- recording / review
     recordButton.setTooltip ("Record what you sing to a WAV in the song's takes/ folder, "
                              "and start the song. Listening back is the one form of "
@@ -284,6 +373,39 @@ MainComponent::MainComponent (AudioEngine& p)
     restartButton.onClick = [this] { seekSong (0.0); };
     addChildComponent (restartButton);
 
+    rewindButton.setTooltip ("Back " + juce::String (kRewindSeconds, 0)
+                               + " seconds. Stops at the loop start while a loop is armed.");
+    rewindButton.onClick = [this] { rewind(); };
+    addChildComponent (rewindButton);
+
+    loopButton.setTooltip ("Loop a section over and over. With no section marked yet this "
+                           "loops the phrase you are in; drag the thin lane along the top "
+                           "of the transport strip to mark a different one.");
+    loopButton.setClickingTogglesState (true);
+    loopButton.onClick = [this] { toggleLoop(); };
+    addChildComponent (loopButton);
+
+    //-------------------------------------------------------- transport strip
+    transportBar.onSeek = [this] (double seconds)
+    {
+        // Scrubbing does NOT stop playback. Dropping into the middle of a
+        // chorus and hearing it immediately is the entire point; making the
+        // singer press play again after every seek would make the strip
+        // something you use between takes rather than during one.
+        seekSong (seconds);
+    };
+
+    transportBar.onLoopChanged = [this] (double start, double end)
+    {
+        setLoop (start, end, end > start);
+    };
+
+    //------------------------------------------------------- piano keyboard
+    keyboard.onKeyPressed = [this] (int midi)
+    {
+        engine.getReferenceTone().strike (midi);
+    };
+
     titleLabel.setText ("Vocal Trainer", juce::dontSendNotification);
     titleLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (titleLabel);
@@ -295,7 +417,7 @@ MainComponent::MainComponent (AudioEngine& p)
     // Populate BEFORE attaching: ComboBoxParameterAttachment maps the parameter
     // range linearly onto the item indices, so the item count must be final.
     for (int m = kLowestSelectableNote; m <= kHighestSelectableNote; ++m)
-        noteSelector.addItem (juce::MidiMessage::getMidiNoteName (m, true, true, 3),
+        noteSelector.addItem (juce::MidiMessage::getMidiNoteName (m, true, true, kOctaveNumberForMiddleC),
                               m - kLowestSelectableNote + 1);
 
     addAndMakeVisible (noteSelector);
@@ -408,6 +530,16 @@ void MainComponent::applyTheme()
     titleLabel.setColour  (juce::Label::textColourId, textColour);
     noteCaption.setColour (juce::Label::textColourId, dimColour);
     footerLabel.setColour (juce::Label::textColourId, dimColour);
+
+    // The latency call-out's captions. Without these they render in the default
+    // LookAndFeel colour, which against this app's dark panel is close enough to
+    // invisible that the two sliders would be unlabelled.
+    outputLatencyCaption.setColour (juce::Label::textColourId, textColour);
+    inputLatencyCaption.setColour  (juce::Label::textColourId, textColour);
+    latencyHint.setColour          (juce::Label::textColourId, dimColour);
+    latencyDriverButton.setColour  (juce::TextButton::buttonColourId, t.panel);
+    latencyDriverButton.setColour  (juce::TextButton::textColourOffId, dimColour);
+
     freeSingToggle.setColour (juce::ToggleButton::textColourId, textColour);
     freeSingToggle.setColour (juce::ToggleButton::tickColourId, t.targetBarActive);
 
@@ -433,9 +565,26 @@ void MainComponent::applyTheme()
     recordButton.setColour (juce::TextButton::textColourOffId, t.traceOutOfTune);
     recordButton.setColour (juce::TextButton::buttonColourId, t.panel);
 
+    // Lit while a section is armed, so the one control that silently changes
+    // what the transport does is never ambiguous about whether it is on.
+    loopButton.setColour (juce::TextButton::buttonOnColourId, t.loopRegion);
+    loopButton.setColour (juce::TextButton::textColourOnId, t.background);
+    loopButton.setColour (juce::TextButton::buttonColourId, t.panel);
+    loopButton.setColour (juce::TextButton::textColourOffId, dimColour);
+
+    for (auto* button : { &restartButton, &rewindButton })
+    {
+        button->setColour (juce::TextButton::buttonColourId, t.panel);
+        button->setColour (juce::TextButton::textColourOffId, dimColour);
+    }
+
     importOverlay.applyTheme();
     reviewOverlay.applyTheme();
     editPanel.applyTheme();
+    keyboard.applyTheme();
+    transportBar.applyTheme();
+    highway.applyTheme();
+    lyricStrip.applyTheme();
 
     titleLabel.setFont  (juce::Font (juce::FontOptions ((float) juce::jmax (12, t.headerHeight - 14))));
     footerLabel.setFont (juce::Font (juce::FontOptions ((float) juce::jmax (10, t.footerHeight - 12))));
@@ -516,8 +665,16 @@ void MainComponent::resized()
             row.removeFromLeft (12);
 
         restartButton.setBounds (row.removeFromLeft (30));
+        row.removeFromLeft (3);
+
+        // 40, not the 30 that fits "|<". JUCE indents button text by ~7 px each
+        // side, and "<<" is wider than "|<" — at 30 px it silently ellipsised to
+        // "...", which is the same glyph as the overflow menu two feet away.
+        rewindButton.setBounds (row.removeFromLeft (40));
         row.removeFromLeft (4);
         playButton.setBounds (row.removeFromLeft (62));
+        row.removeFromLeft (4);
+        loopButton.setBounds (row.removeFromLeft (56));
 
         if (levelsButton.isVisible())
         {
@@ -549,8 +706,6 @@ void MainComponent::resized()
 
     footerLabel.setBounds (bounds.removeFromBottom (t.footerHeight).reduced (10, 2));
 
-    lane.setBounds (bounds);
-
     // The chart editor sits at the very bottom, below the lyrics: it is a tool
     // panel, and putting it between the highway and the words would separate the
     // two things being sung from each other.
@@ -562,6 +717,20 @@ void MainComponent::resized()
     else
     {
         editPanel.setBounds ({});
+    }
+
+    // The transport strip goes under the words rather than over them: it is
+    // where you look BETWEEN attempts, and the lyrics are what you read DURING
+    // one, so the thing being read while singing stays nearest the notes.
+    if (inChartMode() && t.showTransportBar)
+    {
+        transportBar.setBounds (bounds.removeFromBottom (t.transportBarHeight));
+        transportBar.setVisible (true);
+    }
+    else
+    {
+        transportBar.setBounds ({});
+        transportBar.setVisible (false);
     }
 
     // The lyric strip sits BELOW the highway, in its own fixed band. It only
@@ -576,6 +745,34 @@ void MainComponent::resized()
         lyricStrip.setBounds ({});
     }
 
+    // The keyboard comes off the LEFT of whatever the pitch view was going to
+    // get, so the two end up with the same top and the same height — which is
+    // what makes their identical yForMidi() land a key and its row on the same
+    // pixels. Dropped entirely on a window too narrow to spare the width: a
+    // 68 px reference against 120 px of highway is not a trade worth making.
+    //
+    // FREE SING ONLY. In free sing there is nothing on screen naming the pitch
+    // you are on, so a keyboard is the reference. The moment a chart or an
+    // exercise is loaded there is a bar to aim at, the bar carries its own note
+    // name, and the gutter names every row — the keyboard is then a third copy
+    // of the same information, charging 68 px of the scrolling view for it.
+    if (! inChartMode() && t.showPianoKeyboard && bounds.getWidth() > t.pianoWidthPx * 4)
+    {
+        keyboard.setBounds (bounds.removeFromLeft (t.pianoWidthPx));
+        keyboard.setVisible (true);
+    }
+    else
+    {
+        keyboard.setBounds ({});
+        keyboard.setVisible (false);
+    }
+
+    // Belt and braces: the gutter names every row, and beside a keyboard that
+    // would be a second column of note names an inch from the first. The
+    // keyboard no longer appears in chart mode, so this is always on there.
+    highway.setGutterLabelsVisible (! keyboard.isVisible());
+
+    lane.setBounds (bounds);
     highway.setBounds (bounds);
 
     // Over the whole playing area, including the lyric strip: nothing under it
@@ -681,6 +878,24 @@ void MainComponent::onVBlank()
 
         lastEstimateTime = s.timeSeconds;
         haveLastEstimate = true;
+        newestSmoothedMidi = s.smoothedMidi;
+    }
+
+    // The keyboard's marker is the TRUE pitch, straight off the newest estimate,
+    // not the lane's octave-folded readout. The lane folds because a bass
+    // singing the melody an octave down must still see the trace on the bar; the
+    // keyboard's whole question is "which key am I on", and folding it would
+    // point at a key the singer is demonstrably not singing.
+    //
+    // Only ever visible beside the free-sing lane (see resized()), so the lane
+    // is the only view it has to agree with.
+    if (keyboard.isVisible())
+    {
+        if (n > 0)
+            keyboard.setSungMidi (newestSmoothedMidi);
+
+        keyboard.setViewRange (lane.getViewLowMidi(), lane.getViewHighMidi());
+        keyboard.setTargetMidi (lane.getTargetNote());
     }
 
     if (inChartMode())
@@ -700,7 +915,27 @@ void MainComponent::onVBlank()
         // that makes the analysis lag read as natural rather than as lag.
         constexpr double kWindowCentreLag = (double) (kAnalysisWindow / 2) / kAnalysisRate;
 
-        highway.setClock (lastEstimateTime + kWindowCentreLag, currentChartTime());
+        // LATENCY COMPENSATION, and the two halves do different jobs.
+        //
+        // The mapping this sets up is
+        //     chartTime = chartNow + (sampleStreamTime - streamNow)
+        //
+        // OUTPUT latency comes off chartNow, so the whole timeline — the
+        // now-line the singer watches AND every mic sample mapped through it —
+        // slides back to what is actually in the headphones.
+        //
+        // INPUT latency goes ONTO streamNow, which moves the mic samples
+        // without moving the now-line. Raising streamNow maps a sample earlier
+        // in chart time, which is correct: a sample stamped at time s was sung
+        // before that, by however long the capture path took. It is the same
+        // lever kWindowCentreLag already pulls, for the same reason.
+        //
+        // Together the microphone shifts by the full ROUND TRIP while the
+        // highway shifts by the output leg alone — which is the honest answer,
+        // because a sung note is late by both legs: the cue that prompted it
+        // arrived late, and the reply took time to come back.
+        highway.setClock (lastEstimateTime + kWindowCentreLag + inputLatencySeconds,
+                          perceivedChartTime());
         highway.tickAnimation (dt);
 
         //------------------------------------------------------------------
@@ -727,7 +962,9 @@ void MainComponent::onVBlank()
 
         if (lyricStrip.hasAnyLyrics())
         {
-            lyricStrip.setNowTime (currentChartTime());
+            // Perceived, not raw: the words have to change when the singer HEARS
+            // the line change, or they are reading ahead of the music.
+            lyricStrip.setNowTime (perceivedChartTime());
             lyricStrip.repaint();
         }
 
@@ -738,11 +975,22 @@ void MainComponent::onVBlank()
         if (n > 0 || songPlaying)
             highway.repaint();
 
+        transportBar.setPosition (currentChartTime());
+
         //------------------------------------------------------------------
-        // END OF TAKE. Two ways it can happen, and both have to be caught here
-        // rather than by a callback from the audio thread.
+        // LOOPING, then END OF TAKE — in that order, and they are exclusive.
+        //
+        // A loop is an explicit "I am drilling this section", and a section
+        // ending is not a performance ending: popping the review screen up in
+        // the middle of the fourth pass at a bridge would interrupt exactly the
+        // activity the loop was armed for. So while a loop is armed the song
+        // never finishes by itself; the singer disarms it or presses Review.
         //------------------------------------------------------------------
-        if (songPlaying)
+        if (songPlaying && loopEnabled && loopEndSeconds > loopStartSeconds)
+        {
+            applyLoopWrap();
+        }
+        else if (songPlaying)
         {
             const auto& backing = engine.getBackingPlayer();
 
@@ -893,6 +1141,16 @@ double MainComponent::currentChartTime() const noexcept
     return songPlaying ? (lastEstimateTime - songAnchorStream) : pausedChartTime;
 }
 
+double MainComponent::perceivedChartTime() const noexcept
+{
+    // Not clamped at zero. A negative value early in a song is CORRECT — with a
+    // 200 ms offset the first 200 ms of the file has been written to the device
+    // but not yet heard, and clamping would park the now-line while the audio
+    // ran on, putting the highway ahead of the music at exactly the moment the
+    // singer is trying to find the first entry.
+    return currentChartTime() - outputLatencySeconds;
+}
+
 void MainComponent::setSongPlaying (bool shouldPlay)
 {
     if (shouldPlay == songPlaying || ! inChartMode())
@@ -958,8 +1216,121 @@ void MainComponent::seekSong (double chartSeconds)
     reviewButton.setEnabled (haveLastTakeSummary);
 
     highway.clearHistory();
-    highway.setNowTime (pausedChartTime);
+
+    // Perceived, to match what the next vblank's setClock will put here. Using
+    // the raw seek target instead would show the offset as a visible jump the
+    // instant playback started.
+    highway.setNowTime (pausedChartTime - outputLatencySeconds);
     highway.repaint();
+}
+
+//==============================================================================
+// Scrubbing and section looping
+//==============================================================================
+void MainComponent::setLoop (double startSeconds, double endSeconds, bool enabled)
+{
+    loopStartSeconds = juce::jmax (0.0, startSeconds);
+    loopEndSeconds   = juce::jmax (0.0, endSeconds);
+    loopEnabled      = enabled && loopEndSeconds > loopStartSeconds;
+
+    transportBar.setLoop (loopStartSeconds, loopEndSeconds, loopEnabled);
+    loopButton.setToggleState (loopEnabled, juce::dontSendNotification);
+}
+
+bool MainComponent::phraseRangeAt (double t, double& start, double& end) const
+{
+    if (! inChartMode())
+        return false;
+
+    const auto index = chart->phraseIndexAt (t);
+
+    if (index >= 0)
+    {
+        const auto& phrase = chart->getPhrases()[(size_t) index];
+        start = phrase.startSeconds - kLoopLeadInSeconds;
+        end   = phrase.endSeconds;
+    }
+    else
+    {
+        // No phrases, or a gap between them. A fixed window round the playhead
+        // is still a section, and refusing to loop because the importer found
+        // no phrase boundary would make the button dead on every exercise.
+        start = t - kLoopFallbackBefore;
+        end   = t + kLoopFallbackAfter;
+    }
+
+    start = juce::jmax (0.0, start);
+    end   = juce::jmin (end, juce::jmax (chart->getDurationSeconds(),
+                                          engine.getBackingPlayer().getLengthSeconds()));
+
+    return end > start;
+}
+
+void MainComponent::toggleLoop()
+{
+    if (! inChartMode())
+    {
+        loopButton.setToggleState (false, juce::dontSendNotification);
+        return;
+    }
+
+    // The button's own toggle has already flipped by the time this runs.
+    const bool wantOn = loopButton.getToggleState();
+
+    if (! wantOn)
+    {
+        // Disable, but KEEP the region. Turning looping off to run the whole
+        // song and then wanting the same section back again is the normal
+        // rhythm of practising, and re-marking it every time is the sort of
+        // small tax that stops a feature being used.
+        setLoop (loopStartSeconds, loopEndSeconds, false);
+        return;
+    }
+
+    if (loopEndSeconds > loopStartSeconds)
+    {
+        setLoop (loopStartSeconds, loopEndSeconds, true);
+        return;
+    }
+
+    double start = 0.0, end = 0.0;
+
+    if (! phraseRangeAt (currentChartTime(), start, end))
+    {
+        loopButton.setToggleState (false, juce::dontSendNotification);
+        return;
+    }
+
+    setLoop (start, end, true);
+}
+
+bool MainComponent::applyLoopWrap()
+{
+    if (! loopEnabled || loopEndSeconds <= loopStartSeconds)
+        return false;
+
+    // hasFinished() as well as the time test, because a chart can be LONGER than
+    // the audio behind it — the last note of an a cappella tail, an importer
+    // that rounded up. A loop ending inside that gap would never be reached by
+    // a transport that had already stopped, and the song would sit silently at
+    // the end forever with Loop still lit.
+    if (currentChartTime() < loopEndSeconds
+        && ! engine.getBackingPlayer().hasFinished())
+        return false;
+
+    seekSong (loopStartSeconds);
+    return true;
+}
+
+void MainComponent::rewind()
+{
+    if (! inChartMode())
+        return;
+
+    const auto floorSeconds = loopEnabled && loopEndSeconds > loopStartSeconds
+                                ? loopStartSeconds : 0.0;
+
+    seekSong (juce::jmax (floorSeconds, currentChartTime() - kRewindSeconds));
 }
 
 //==============================================================================
@@ -975,7 +1346,9 @@ void MainComponent::showOverflowMenu()
         menu.addItem (2, "Edit chart", true, editMode);
 
     menu.addSeparator();
-    menu.addItem (3, "Edit theme...");
+    menu.addItem (3, "Latency...");
+    menu.addItem (5, "Theme...");
+    menu.addItem (4, "Edit theme file...");
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (overflowButton),
                         [this] (int result)
@@ -990,6 +1363,10 @@ void MainComponent::showOverflowMenu()
                             }
                             else if (result == 3)
                             {
+                                showLatencyPanel();
+                            }
+                            else if (result == 4)
+                            {
                                 const auto f = Theme::getThemeFile();
 
                                 if (f.existsAsFile())
@@ -997,6 +1374,45 @@ void MainComponent::showOverflowMenu()
                                 else
                                     f.getParentDirectory().revealToUser();
                             }
+                            else if (result == 5)
+                            {
+                                showThemeMenu();
+                            }
+                        });
+}
+
+void MainComponent::showThemeMenu()
+{
+    const auto names = Theme::getPresetNames();
+    const auto active = theme->getPresetName();
+
+    juce::PopupMenu menu;
+
+    for (int i = 0; i < names.size(); ++i)
+        menu.addItem (i + 1, names[i], true, names[i] == active);
+
+    menu.addSeparator();
+
+    // Said out loud rather than discovered afterwards: theme.json is the live
+    // tuning surface and a preset REPLACES it. Someone who has spent an evening
+    // nudging colours in that file deserves to be told before, not after.
+    menu.addSectionHeader ("Picking a theme rewrites theme.json");
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (overflowButton),
+                        [this, names] (int result)
+                        {
+                            if (result <= 0 || result > names.size())
+                                return;
+
+                            const auto name = names[result - 1];
+
+                            if (theme->applyPreset (name))
+                                footerLabel.setText ("Theme: " + name,
+                                                     juce::dontSendNotification);
+                            else
+                                footerLabel.setText ("Could not write "
+                                                       + Theme::getThemeFile().getFullPathName(),
+                                                     juce::dontSendNotification);
                         });
 }
 
@@ -1026,14 +1442,6 @@ void MainComponent::layoutLevelsPanel()
 
 void MainComponent::showLevelsPanel()
 {
-    // A second click on the button closes it, which is what a button that opens
-    // a panel is expected to do.
-    if (levelsCallout != nullptr)
-    {
-        levelsCallout->dismiss();
-        return;
-    }
-
     const auto rows = (monitorToggle.isVisible() ? 1 : 0)
                         + (guideVocalToggle.isVisible() ? 1 : 0);
 
@@ -1043,23 +1451,125 @@ void MainComponent::showLevelsPanel()
     levelsPanel.setSize (356, 16 + rows * 26 + (rows > 1 ? 6 : 0));
     layoutLevelsPanel();
 
-    levelsCallout = std::make_unique<juce::CallOutBox> (levelsPanel,
-                                                        levelsButton.getBounds(),
-                                                        this);
+    showCallout (levelsPanel, levelsButton, levelsCallout);
+}
+
+void MainComponent::showCallout (juce::Component& panel, const juce::Component& anchor,
+                                 std::unique_ptr<juce::CallOutBox>& slot)
+{
+    // A second click on the button closes it, which is what a button that opens
+    // a panel is expected to do.
+    if (slot != nullptr)
+    {
+        slot->dismiss();
+        return;
+    }
+
+    slot = std::make_unique<juce::CallOutBox> (panel, anchor.getBounds(), this);
 
     // Modal so that clicking anywhere else dismisses it — and NOT deleting
     // itself on dismissal, because the panel it displays is a member of this
     // editor and outlives any one call-out.
+    //
+    // `slotPtr` is a member of the editor the SafePointer guards, so proving the
+    // editor is alive proves the slot is too. Capturing the reference itself
+    // would give the lambda no way to make that check.
     juce::Component::SafePointer<MainComponent> safe (this);
+    auto* slotPtr = &slot;
 
-    levelsCallout->enterModalState (false,
-                                    juce::ModalCallbackFunction::create (
-                                        [safe] (int) mutable
-                                        {
-                                            if (safe != nullptr)
-                                                safe->levelsCallout.reset();
-                                        }),
-                                    false);
+    slot->enterModalState (false,
+                           juce::ModalCallbackFunction::create (
+                               [safe, slotPtr] (int) mutable
+                               {
+                                   if (safe != nullptr)
+                                       slotPtr->reset();
+                               }),
+                           false);
+}
+
+//==============================================================================
+// Latency compensation
+//==============================================================================
+void MainComponent::layoutLatencyPanel()
+{
+    constexpr int kRowHeight  = 26;
+    constexpr int kLabelWidth = 74;
+    constexpr int kGap        = 6;
+    // Two lines' worth. juce::Label derives its line count from the height it is
+    // given, and the hint is set not to squash horizontally, so a box too short
+    // truncates the sentence rather than wrapping it.
+    constexpr int kHintHeight = 44;
+
+    auto area = latencyPanel.getLocalBounds().reduced (8);
+
+    auto row = area.removeFromTop (kRowHeight);
+    outputLatencyCaption.setBounds (row.removeFromLeft (kLabelWidth));
+    outputLatency.setBounds (row);
+    area.removeFromTop (kGap);
+
+    row = area.removeFromTop (kRowHeight);
+    inputLatencyCaption.setBounds (row.removeFromLeft (kLabelWidth));
+    inputLatency.setBounds (row);
+    area.removeFromTop (kGap);
+
+    row = area.removeFromTop (kRowHeight);
+    latencyDriverButton.setBounds (row.removeFromLeft (110));
+    area.removeFromTop (kGap);
+
+    latencyHint.setBounds (area.removeFromTop (kHintHeight));
+}
+
+void MainComponent::showLatencyPanel()
+{
+    latencyPanel.setSize (356, 16 + 3 * 26 + 3 * 6 + 44);
+    layoutLatencyPanel();
+
+    showCallout (latencyPanel, overflowButton, latencyCallout);
+}
+
+void MainComponent::pushLatencyOffsets()
+{
+    const auto outMs = juce::roundToInt (outputLatency.getValue());
+    const auto inMs  = juce::roundToInt (inputLatency.getValue());
+
+    outputLatencySeconds = (double) outMs * 0.001;
+    inputLatencySeconds  = (double) inMs  * 0.001;
+
+    // Belongs to the INSTALL, not the song: it describes the headphones and the
+    // interface, which do not change when you load a different chart.
+    settings->setOutputLatencyMs (outMs);
+    settings->setInputLatencyMs (inMs);
+}
+
+void MainComponent::fillLatencyFromDriver()
+{
+    auto* holder = juce::StandalonePluginHolder::getInstance();
+
+    if (holder == nullptr)
+        return;
+
+    auto* device = holder->deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+        return;
+
+    const auto rate = device->getCurrentSampleRate();
+
+    if (rate <= 0.0)
+        return;
+
+    const auto toMs = [rate] (int samples)
+    {
+        return juce::jlimit (0, AppSettings::kMaxLatencyMs,
+                             juce::roundToInt ((double) samples * 1000.0 / rate));
+    };
+
+    // sendNotification so the two onValueChange handlers persist the new values;
+    // setting them silently would leave the file disagreeing with the sliders.
+    outputLatency.setValue ((double) toMs (device->getOutputLatencyInSamples()),
+                            juce::sendNotificationSync);
+    inputLatency.setValue ((double) toMs (device->getInputLatencyInSamples()),
+                           juce::sendNotificationSync);
 }
 
 //==============================================================================
@@ -1087,7 +1597,7 @@ void MainComponent::showExerciseMenu()
     // turning the menu into a piano.
     for (int m = 48; m <= 72; ++m)
         roots.addItem (kRootIdBase + m,
-                       juce::MidiMessage::getMidiNoteName (m, true, true, 3),
+                       juce::MidiMessage::getMidiNoteName (m, true, true, kOctaveNumberForMiddleC),
                        true, m == rootMidi);
 
     menu.addSubMenu ("Starting note", roots);
@@ -1112,7 +1622,7 @@ void MainComponent::showExerciseMenu()
     menu.addSubMenu ("Length", lengths);
 
     menu.addSeparator();
-    menu.addSectionHeader (juce::MidiMessage::getMidiNoteName (rootMidi, true, true, 3)
+    menu.addSectionHeader (juce::MidiMessage::getMidiNoteName (rootMidi, true, true, kOctaveNumberForMiddleC)
                              + ", " + juce::String (bpm) + " bpm, "
                              + juce::String (length / 60) + ":"
                              + juce::String (length % 60).paddedLeft ('0', 2));
@@ -1234,7 +1744,7 @@ void MainComponent::loadExercise (const ExerciseSpec& spec)
     if (spec.referenceBeats > 0 && ! chart->getNotes().empty())
         summary << "   |   starts on "
                 << juce::MidiMessage::getMidiNoteName (chart->getNotes().front().midi,
-                                                       true, true, 3)
+                                                       true, true, kOctaveNumberForMiddleC)
                 << ", then " << juce::String (juce::jmax (0, spec.countInBeats))
                 << " counts";
 
@@ -1349,8 +1859,12 @@ void MainComponent::loadChart (const juce::File& file)
 
     if (loaded == nullptr)
     {
-        chart.reset();
-        highway.setChart (nullptr);
+        // Full teardown, not just the highway. The scorer, lyric strip and edit
+        // panel all hold non-owning pointers into the current chart; clearing
+        // `chart` while any of them still points at it is a use-after-free on
+        // the next vblank. unloadChart() nulls every consumer in one place.
+        if (inChartMode())
+            unloadChart();
 
         footerLabel.setText ("Could not load chart: " + error, juce::dontSendNotification);
         return;
@@ -1413,6 +1927,12 @@ void MainComponent::loadChart (const juce::File& file)
         summary << "   |   " << chart->getWarnings().size() << " chart warning(s): "
                 << chart->getWarnings().front().code;
 
+    // The strip spans whichever is LONGER. A backing track that outruns the last
+    // note is normal — outros exist — and a strip that stopped at the chart's
+    // duration would leave the end of the audio unreachable by scrubbing.
+    transportBar.setDurationSeconds (juce::jmax (chart->getDurationSeconds(),
+                                                 backing.getLengthSeconds()));
+
     footerLabel.setText (summary, juce::dontSendNotification);
 
     // Repaint, not just relayout: entering or leaving chart mode changes how
@@ -1435,6 +1955,11 @@ juce::String MainComponent::installChart (std::unique_ptr<Chart> newChart)
 
     chart = std::move (newChart);
 
+    // The detector's Hz -> MIDI conversion must use the chart's own A4
+    // reference, or a song analysed off concert pitch reads with a constant
+    // cents bias against the very record the singer is matching.
+    engine.setChartTuningHz ((float) chart->getTuningHz());
+
     scorer.setChart (chart.get());
     scorer.setMedianMs (theme->get().colourMedianMs);
     reviewShownForTake = false;
@@ -1448,6 +1973,12 @@ juce::String MainComponent::installChart (std::unique_ptr<Chart> newChart)
     highway.setSelectedNoteId (-1);
     highway.setVisible (true);
     lane.setVisible (false);
+
+    // setChart clears any region, and the button has to follow it: a Loop button
+    // left lit over a section of the PREVIOUS song is a control pointing at
+    // music that is no longer loaded.
+    transportBar.setChart (chart.get());
+    setLoop (0.0, 0.0, false);
 
     lyricStrip.setChart (chart.get());
     lyricStrip.setAutoTranscribed (chart->getLyricSource() == "asr");
@@ -1466,6 +1997,8 @@ juce::String MainComponent::installChart (std::unique_ptr<Chart> newChart)
     playButton.setVisible (true);
     playButton.setEnabled (true);
     restartButton.setVisible (true);
+    rewindButton.setVisible (true);
+    loopButton.setVisible (true);
     recordButton.setVisible (true);
     recordButton.setButtonText ("Rec");
     listenButton.setVisible (true);
@@ -1511,6 +2044,9 @@ void MainComponent::unloadChart()
     highway.setVisible (false);
     lane.setVisible (true);
 
+    transportBar.setChart (nullptr);
+    setLoop (0.0, 0.0, false);
+
     lyricStrip.setChart (nullptr);
     lyricStrip.setVisible (false);
 
@@ -1519,6 +2055,8 @@ void MainComponent::unloadChart()
     playButton.setVisible (false);
     playButton.setEnabled (false);
     restartButton.setVisible (false);
+    rewindButton.setVisible (false);
+    loopButton.setVisible (false);
     recordButton.setVisible (false);
     listenButton.setVisible (false);
     reviewButton.setVisible (false);
@@ -1535,6 +2073,7 @@ void MainComponent::unloadChart()
 
     engine.getBackingPlayer().unload();
     engine.setChartTargetMidi (-1.0f);
+    engine.setChartTuningHz (440.0f);
 
     titleLabel.setText ("Vocal Trainer", juce::dontSendNotification);
     resized();

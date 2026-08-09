@@ -583,8 +583,13 @@ def _measure(
 ) -> _Candidate:
     cand = _Candidate(frames=frames)
     first, last = int(frames[0]), int(frames[-1])
-    cand.start_seconds = float(times[first])
-    cand.duration_seconds = float(times[last] - times[first] + hop)
+
+    # times[] are frame CENTRES, so the voiced region actually spans
+    # [times[first] - hop/2, times[last] + hop/2]. Starting the note at the
+    # first centre shifted every note a constant half hop (~8 ms) late against
+    # both the audio and the contour, which is sampled at the true frame times.
+    cand.start_seconds = float(max(0.0, times[first] - hop * 0.5))
+    cand.duration_seconds = float(times[last] + hop * 0.5) - cand.start_seconds
 
     values = pitch_cents_curve[frames]
     values = values[np.isfinite(values)]

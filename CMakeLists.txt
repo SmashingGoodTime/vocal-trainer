@@ -79,6 +79,7 @@ target_sources(VocalTrainer PRIVATE
     src/app/AppSettings.cpp
     src/dsp/AnalysisChain.cpp
     src/audio/BackingPlayer.cpp
+    src/audio/ReferenceTone.cpp
     src/audio/TakeRecorder.cpp
     src/chart/Chart.cpp
     src/chart/ChartWriter.cpp
@@ -89,6 +90,8 @@ target_sources(VocalTrainer PRIVATE
     src/ui/Theme.cpp
     src/ui/PitchLaneComponent.cpp
     src/ui/NoteHighwayComponent.cpp
+    src/ui/PianoKeyboardComponent.cpp
+    src/ui/TransportBarComponent.cpp
     src/ui/ImportOverlayComponent.cpp
     src/ui/LyricStripComponent.cpp
     src/ui/ReviewOverlayComponent.cpp
@@ -137,6 +140,13 @@ target_link_libraries(VocalTrainer
 #------------------------------------------------------------------------------
 
 if (VT_BUILD_TESTS)
+    # Register every runner with CTest, so `ctest` aggregates all five instead
+    # of reporting "No tests were found!!!" while 190 passing checks sit unrun.
+    # Each runner already exits non-zero on its first failing check, which is
+    # all CTest needs. The vt_backing_tests crash-not-fail behaviour (see below)
+    # surfaces as a failed test with exit code 0xC0000094.
+    enable_testing()
+
     juce_add_console_app(vt_tests
         PRODUCT_NAME "vt_tests")
 
@@ -267,7 +277,9 @@ if (VT_BUILD_TESTS)
         src/score/TakeScorer.cpp        # the highway reads NoteScores to recolour notes
         src/ui/Theme.cpp
         src/ui/ImportOverlayComponent.cpp
-        src/ui/NoteHighwayComponent.cpp)
+        src/ui/NoteHighwayComponent.cpp
+        src/ui/PianoKeyboardComponent.cpp
+        src/ui/TransportBarComponent.cpp)
 
     target_include_directories(vt_render_tests PRIVATE src)
 
@@ -282,4 +294,13 @@ if (VT_BUILD_TESTS)
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
+
+    # WORKING_DIRECTORY is the repo root: vt_chart_tests parses the real
+    # songs/synth-demo/chart.json and vt_render_tests resolves the library root
+    # by walking up from the executable, and both are happier started from here.
+    foreach(runner vt_tests vt_chart_tests vt_score_tests vt_backing_tests vt_render_tests)
+        add_test(NAME ${runner}
+                 COMMAND ${runner}
+                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endforeach()
 endif()

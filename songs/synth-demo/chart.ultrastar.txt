@@ -2,7 +2,7 @@
 #ARTIST:Unknown
 #MP3:backing.wav
 #BPM:800
-#GAP:568
+#GAP:560
 : 0 52 -5 oh
 : 52 100 0 ~
 : 152 27 4 ~

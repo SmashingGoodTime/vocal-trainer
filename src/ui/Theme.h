@@ -33,11 +33,48 @@ namespace vt
 {
 
 //==============================================================================
+/** What the highway draws behind the notes.
+
+    THE Y AXIS STAYS CHROMATIC-LINEAR IN EVERY ONE OF THESE. That is the whole
+    reason `staff` is a background style and not a separate view: real notation
+    spaces the staff DIATONICALLY, so a C major scale climbs in even steps while
+    a chromatic one bunches up. Adopting that spacing here would mean a semitone
+    was worth a different number of pixels depending on which semitone it was —
+    and the target bar's drawn height is 2 x tFullCents, so "inside the bar means
+    full credit" would quietly stop being true. That single guarantee is worth
+    more than evenly-spaced staff lines.
+
+    So the staff lines are drawn at their TRUE PITCH HEIGHTS. E-G-B-D-F is
+    3-4-3-4 semitones, which reads as a staff with slightly uneven spacing, and
+    every accidental genuinely sits where its pitch is. */
+enum class BackgroundStyle
+{
+    chromatic,      ///< one grid line per semitone (the default)
+    staff,          ///< treble + bass staff lines only
+    staffAndGrid,   ///< staff lines over a faint semitone grid
+    plain           ///< nothing at all — the "advanced" view of DESIGN.md §6
+};
+
+/** For theme.json round-tripping. Unknown strings fall back to `chromatic`. */
+BackgroundStyle backgroundStyleFromString (const juce::String&) noexcept;
+const char*     backgroundStyleToString (BackgroundStyle) noexcept;
+
+//==============================================================================
 /** The complete set of tunable constants. Defaults here are the DESIGN.md values
     and are what gets written to theme.json the first time the app runs.
 */
 struct ThemeValues
 {
+    /** Which named preset theme.json declares itself to be. Purely so the Theme
+        menu can tick the active entry; nothing branches on it.
+
+        It is also the FALLBACK BASE for every missing key (see loadFrom), which
+        is what makes a one-line theme.json — `{ "preset": "Sheet Music" }` — a
+        complete theme. It is not a claim that the file is unmodified: hand-edit
+        a colour and the name stays, which is correct, because the rest of the
+        file is still that preset. */
+    juce::String presetName { "Midnight" };
+
     //== Colours — Okabe-Ito, DESIGN.md §7 ====================================
     juce::Colour background        { 0xff101014 };
     juce::Colour panel             { 0xff16161c };
@@ -73,6 +110,70 @@ struct ThemeValues
 
     /** Outline of the note selected in the chart editor. */
     juce::Colour editSelection     { 0xfff0e442 };
+
+    //== Background style =====================================================
+    BackgroundStyle backgroundStyle = BackgroundStyle::chromatic;
+
+    juce::Colour staffLine         { 0xff5a5a6a };
+    /** Ledger lines and the middle-C guide: present, but never competing with
+        the five real lines of each staff. */
+    juce::Colour staffLedger       { 0xff3a3a46 };
+    float staffLineThicknessPx     = 1.4f;
+    float staffLedgerThicknessPx   = 1.0f;
+    /** Faint semitone grid drawn UNDER the staff in `staffAndGrid`. */
+    float staffGridAlpha           = 0.35f;
+
+    //== Note names on the bars ===============================================
+    /** DESIGN.md §6.3: "display richness scales inversely with skill". Note
+        names are the beginner half of that, and they are the cheapest possible
+        bridge between "hit this bar" and "you are singing an A". */
+    bool  showNoteNames            = true;
+    bool  noteNameShowOctave       = true;
+
+    /** The name is drawn INSIDE the bar and shrinks to fit its height, down to
+        a legibility floor. This is the size it takes when there is room. */
+    float noteNameHeightPx         = 11.0f;
+
+    /** An EXTRA suppression floor: no name on a bar narrower than this.
+        Zero by default, because the highway now measures the name against the
+        bar it has to fit in and drops the octave digit, then the name itself,
+        rather than letting either spill onto the note next door. Raise it to
+        keep fast passages clean. */
+    float noteNameMinBarWidthPx    = 0.0f;
+    float noteNameAlpha            = 0.92f;
+
+    //== Piano keyboard reference =============================================
+    /** A PIANO-ROLL keyboard, not a photographic one: one equal-height key per
+        semitone, so a key lines up EXACTLY with the highway row beside it. A
+        real keyboard's geometry (7 white keys spanning 12 semitones) would put
+        every label a few pixels away from the pitch it names, which for a
+        reference is the one thing it must not do. */
+    bool  showPianoKeyboard        = true;
+    int   pianoWidthPx             = 68;
+
+    /** THE KEYS ARE THE THEME'S OWN COLOURS, NOT PHOTOGRAPHIC WHITE AND BLACK.
+        A near-white slab down the left edge of a midnight window is the
+        brightest thing on screen, and it is the one element that is only a
+        reference — it would out-shout the trace and the bars, which are what
+        the singer is actually reading. So a dark theme gets a dark keyboard,
+        exactly as every piano roll in every dark-themed DAW does.
+        "White" and "black" survive as a LIGHTNESS difference, which is all the
+        eye needs to read the shape of an octave. */
+    juce::Colour pianoWhiteKey     { 0xff2a2a33 };
+    juce::Colour pianoBlackKey     { 0xff0c0c10 };
+    juce::Colour pianoKeyBorder    { 0xff3a3a46 };
+    juce::Colour pianoLabel        { 0xff8a8a96 };
+    /** Black keys as a fraction of the keyboard's width. */
+    float pianoBlackKeyWidth       = 0.62f;
+
+    //== Transport bar ========================================================
+    bool  showTransportBar         = true;
+    int   transportBarHeight       = 34;
+    juce::Colour transportTrack    { 0xff1c1c24 };
+    juce::Colour transportDensity  { 0xff44546a };
+    juce::Colour transportPlayhead { 0xfff0e442 };
+    juce::Colour loopRegion        { 0xff56b4e9 };
+    float loopRegionAlpha          = 0.22f;
 
     //== Lane geometry ========================================================
     int   headerHeight            = 32;
@@ -231,9 +332,44 @@ public:
     /** %APPDATA%/VocalTrainer/theme.json */
     static juce::File getThemeFile();
 
+    //== Presets ==============================================================
+    /** The built-in themes, in menu order. The first entry is the default. */
+    static juce::StringArray getPresetNames();
+
+    /** The values for a named preset, or the defaults for an unknown name.
+        Static and pure, so the presets can be rendered in a test without a
+        Theme instance or a theme.json anywhere near it. */
+    static ThemeValues getPreset (const juce::String& name);
+
+    /** Adopts a preset and WRITES IT TO theme.json, then broadcasts.
+
+        Writing is the point, not a side effect. theme.json is the single source
+        of truth for every visual constant and it is hot-reloaded at 4 Hz; a
+        preset held only in memory would be silently reverted by the next poll
+        that noticed the file, and would not survive a restart. Picking a theme
+        therefore replaces hand-edits, which is what picking a theme means. */
+    bool applyPreset (const juce::String& name);
+
+    /** Adopts `newValues` IN MEMORY and broadcasts. Does not touch theme.json,
+        so the next edit to that file replaces them.
+
+        The in-memory half of applyPreset(), split out because rendering a set of
+        values is a different job from persisting them — the offscreen render
+        tests draw every preset and must not write to the user's real theme.json
+        to do it. Not a way to configure the app: see applyPreset. */
+    void adoptValues (const ThemeValues& newValues);
+
+    /** Name of the preset theme.json declares. See ThemeValues::presetName. */
+    juce::String getPresetName() const { return values.presetName; }
+
     /** Writes the compiled-in defaults to disk, overwriting whatever is there.
         Also used to create the file on first run. */
     bool writeDefaultsToFile() const;
+
+    /** Serialises an arbitrary set of values. Every key ThemeValues has appears
+        here, so a file written by this and read back by loadFrom() round-trips
+        exactly — which is what makes applyPreset() and the hot reload agree. */
+    static bool writeValuesToFile (const ThemeValues&);
 
     /** Force an immediate re-read. Returns true if the file parsed. */
     bool reloadNow();

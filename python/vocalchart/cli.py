@@ -23,6 +23,7 @@ one-object-per-line protocol in progress.py. That is what the plugin's
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -160,7 +161,8 @@ def _audio_duration_seconds(path: Path, fallback: float) -> float:
 # --------------------------------------------------------------------------- #
 
 def _write_notes_cache(path: Path, notes: list[Note], f0: F0Result) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    from .paths import atomic_write_text
+
     payload = {
         "tool": "vocalchart",
         "version": __version__,
@@ -169,15 +171,22 @@ def _write_notes_cache(path: Path, notes: list[Note], f0: F0Result) -> None:
         "hopSeconds": f0.hop_seconds,
         "notes": [n.to_dict() for n in notes],
     }
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
-        encoding="utf-8",
-        newline="\n",
     )
 
 
 def _read_notes_cache(path: Path) -> list[Note]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+
+    # A cache written by a different vocalchart is a different segmenter's
+    # output. Reusing it would pin the chart to old behaviour until --force;
+    # raising lands in the caller's "resegmenting" path, which is the point.
+    version = payload.get("version")
+    if version != __version__:
+        raise RuntimeError(f"written by vocalchart {version}, this is {__version__}")
+
     return [Note.from_dict(n) for n in payload.get("notes", [])]
 
 
@@ -1070,12 +1079,30 @@ def _run_lyrics(
         say(f"lyrics unavailable ({exc}); charting without text")
         return [], "none"
 
+    from .paths import file_fingerprint
+
+    # What the transcription actually depends on. Compared by EQUALITY against
+    # the fingerprints recorded in the cache, because mtime ordering alone
+    # misses a lyrics.txt or vocals.wav replaced by a copy that preserved the
+    # source's mtime (shutil.copy2, Windows Explorer) — the exact "supply
+    # lyrics and rebuild" path this CLI itself recommends.
+    inputs_now = {"audio": file_fingerprint(song.analysis_input()),
+                  "lyrics": file_fingerprint(song.lyrics_txt)}
+
     if not force and is_cache_fresh(song.words_json, song.analysis_input(), song.lyrics_txt):
         try:
             payload = json.loads(song.words_json.read_text(encoding="utf-8"))
-            words = [Word(**w) for w in payload.get("words", [])]
-            say(f"words cache hit: {len(words)} words")
-            return words, payload.get("lyricSource", "asr")
+
+            if payload.get("model") != model:
+                say(f"words cache is from model '{payload.get('model')}', "
+                    f"'{model}' was asked for; re-transcribing")
+            elif "inputs" in payload and payload["inputs"] != inputs_now:
+                say("words cache does not match the current audio/lyrics; "
+                    "re-transcribing")
+            else:
+                words = [Word(**w) for w in payload.get("words", [])]
+                say(f"words cache hit: {len(words)} words")
+                return words, payload.get("lyricSource", "asr")
         except Exception as exc:                      # noqa: BLE001
             say(f"words cache unreadable ({exc}); re-transcribing")
 
@@ -1102,13 +1129,15 @@ def _run_lyrics(
             "(~30% word error on sung vocals). Drop a lyrics.txt in the song "
             "folder and rebuild to fix the words while keeping the timing.")
 
-    song.words_json.parent.mkdir(parents=True, exist_ok=True)
-    song.words_json.write_text(
+    from .paths import atomic_write_text
+
+    atomic_write_text(
+        song.words_json,
         json.dumps({"lyricSource": source,
                     "model": model,
+                    "inputs": inputs_now,
                     "words": [w.__dict__ for w in words]},
-                   indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8", newline="\n")
+                   indent=2, ensure_ascii=False) + "\n")
 
     return words, source
 
@@ -1230,10 +1259,28 @@ def _ingest_audio(audio: Path, song: SongPaths, force: bool,
         say(f"unrecognised extension '{suffix}'; letting ffmpeg try it")
         dest = song.root / "source.wav"
 
+    marker = song.root / "cache" / "ingest.json"
+    input_sha = sha1_of_file(audio)
+
     if existing is not None and not force:
         # Re-running add-song on the same file must be free, not an error: it is
         # the natural way to resume after a crash or to pick up a new stage.
-        if sha1_of_file(existing) == sha1_of_file(audio):
+        #
+        # Two ways the input can prove it is the one already ingested: it is
+        # byte-identical to what is on disk (a copied audio file), or it matches
+        # the INPUT hash recorded at ingest time. The second is what makes
+        # resume work for video containers — source.wav is extracted from the
+        # .mp4, so hashing one against the other can never match, and without
+        # the marker every re-run on a video errored out instead of resuming.
+        recorded = None
+
+        if marker.exists():
+            try:
+                recorded = json.loads(marker.read_text(encoding="utf-8")).get("inputSha1")
+            except Exception:                          # noqa: BLE001
+                recorded = None
+
+        if input_sha == recorded or input_sha == sha1_of_file(existing):
             say(f"source already present and identical: {existing.name}")
             return existing
 
@@ -1257,6 +1304,15 @@ def _ingest_audio(audio: Path, song: SongPaths, force: bool,
 
         say(f"copying {audio.name} -> {dest.name}")
         shutil.copy2(audio, dest)
+
+        # copy2 preserved the SOURCE's mtime, which can predate caches computed
+        # from a previous recording — stamp now, so mtime freshness stays honest.
+        os.utime(dest, None)
+
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"inputSha1": input_sha, "inputName": audio.name},
+                                 indent=2) + "\n",
+                      encoding="utf-8", newline="\n")
 
     return dest
 
@@ -1339,6 +1395,11 @@ def cmd_add_song(ctx: click.Context, audio_file: Path, song_dir: Optional[Path],
             import shutil
 
             shutil.copy2(lyrics_file, song.lyrics_txt)
+
+            # copy2 preserved the SOURCE file's mtime — often OLDER than an
+            # existing words.json, which would read as "cache still fresh" and
+            # silently ignore the lyrics that were just supplied. Stamp now.
+            os.utime(song.lyrics_txt, None)
             rep.log(f"copied lyrics -> {song.lyrics_txt.name}")
         elif not song.lyrics_txt.exists() and not no_lyrics:
             rep.log("no lyrics.txt: words come from ASR and WILL contain errors "
@@ -1456,7 +1517,12 @@ def import_stems(ctx, stem_dir: Path, song_dir: Path, vocal_match: str,
     else:
         say(f"    chose {lead[0].name}")
 
-    drops = tuple(e.lower() for e in exclude) if not keep_click else ()
+    # --keep-click exempts ONLY "click" from the exclude list — it must not
+    # silently discard the rest of it (--exclude guitar still has to work).
+    drops = tuple(e.lower() for e in exclude)
+
+    if keep_click:
+        drops = tuple(d for d in drops if d != "click")
     backing_files = [p for p in audio_files
                      if p not in co_leads
                      and vocal_match.lower() not in p.name.lower()
@@ -1509,19 +1575,24 @@ def import_stems(ctx, stem_dir: Path, song_dir: Path, vocal_match: str,
         return
 
     say(f"mixing {len(backing_files)} stems into the backing track")
-    mix = None
+
+    # STEREO, deliberately. The charting source has to be mono for the pitch
+    # tracker, but the backing track is what the singer practises against, and
+    # collapsing the whole band to mono throws its image away for nothing. A
+    # mono stem lands dead centre; a stereo one keeps its width.
+    mix = None                                        # (2, N) float64
 
     for p in backing_files:
         say(f"  + {p.name}")
-        a, a_sr = _read_mono(p, target_sr=sr)
+        a = _read_stereo(p, target_sr=sr)
 
         if mix is None:
-            mix = np.zeros(max(len(a), len(vocal)), dtype=np.float64)
+            mix = np.zeros((2, max(a.shape[1], len(vocal))), dtype=np.float64)
 
-        if len(a) > len(mix):
-            mix = np.pad(mix, (0, len(a) - len(mix)))
+        if a.shape[1] > mix.shape[1]:
+            mix = np.pad(mix, ((0, 0), (0, a.shape[1] - mix.shape[1])))
 
-        mix[:len(a)] += a
+        mix[:, :a.shape[1]] += a
 
     # Headroom, not normalisation to full scale: the backing sits UNDER a live
     # voice, and a mix slammed to 0 dBFS leaves the singer nothing to sit on.
@@ -1530,12 +1601,12 @@ def import_stems(ctx, stem_dir: Path, song_dir: Path, vocal_match: str,
     if peak > 1e-9:
         mix *= 0.7 / peak
 
-    sf.write(song_dir / "backing.wav", mix.astype(np.float32), sr)
+    sf.write(song_dir / "backing.wav", mix.T.astype(np.float32), sr)
 
     click.echo(f"imported {song_dir}")
     click.echo(f"  stems/vocals.wav  {len(vocal)/sr:6.1f}s   (charting source)")
-    click.echo(f"  backing.wav       {len(mix)/sr:6.1f}s   ({len(backing_files)} stems, "
-               f"lead vocal excluded)")
+    click.echo(f"  backing.wav       {mix.shape[1]/sr:6.1f}s   ({len(backing_files)} stems, "
+               f"stereo, lead vocal excluded)")
     click.echo(f"\nnext:  vocalchart build {song_dir}")
 
 
@@ -1546,6 +1617,22 @@ def _read_mono(path: Path, target_sr: Optional[int] = None):
 
     audio, sr = librosa.load(str(path), sr=target_sr, mono=True)
     return audio.astype(np.float64), int(sr)
+
+
+def _read_stereo(path: Path, target_sr: Optional[int] = None):
+    """Decode to a (2, n) float64 array. A mono file lands dead centre."""
+    import librosa
+    import numpy as np
+
+    audio, _sr = librosa.load(str(path), sr=target_sr, mono=False)
+    audio = np.atleast_2d(np.asarray(audio, dtype=np.float64))
+
+    if audio.shape[0] == 1:
+        audio = np.repeat(audio, 2, axis=0)
+    elif audio.shape[0] > 2:
+        audio = audio[:2]
+
+    return audio
 
 
 if __name__ == "__main__":  # pragma: no cover

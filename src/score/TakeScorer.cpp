@@ -355,6 +355,12 @@ void TakeScorer::feed (double chartSeconds, float rawFracMidi) noexcept
     live.noteSeconds += dt;
     ++live.frames;
 
+    // Onset is measured from the FIRST voiced frame on the note — the raw
+    // (post-gate) estimate, not the median's first output, which lags it by
+    // three hops (~24 ms) and would report every singer as later than they are.
+    if (std::isfinite (rawFracMidi) && ! std::isfinite (live.firstVoicedChartTime))
+        live.firstVoicedChartTime = chartSeconds;
+
     const auto medianMidi = median.push (rawFracMidi);
 
     if (std::isfinite (medianMidi))
@@ -380,9 +386,6 @@ void TakeScorer::feed (double chartSeconds, float rawFracMidi) noexcept
         // passing frames on a grace note.
         live.centsSum    += (double) cents * dt;
         live.absCentsSum += (double) std::abs (cents) * dt;
-
-        if (! std::isfinite (live.firstVoicedChartTime))
-            live.firstVoicedChartTime = chartSeconds;
 
         if (chartSeconds - note.startSeconds >= kAttackSeconds)
         {

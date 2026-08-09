@@ -28,7 +28,9 @@ from typing import Iterable, Optional
 __all__ = [
     "AUDIO_EXTENSIONS",
     "SongPaths",
+    "atomic_write_text",
     "default_library_root",
+    "file_fingerprint",
     "newest_mtime",
     "is_cache_fresh",
     "sha1_of_file",
@@ -73,6 +75,10 @@ def is_cache_fresh(cache: str | Path, *inputs: str | Path) -> bool:
 
     Inputs that do not exist are ignored rather than treated as infinitely old:
     a missing lyrics.txt should not permanently invalidate an f0 cache.
+
+    Mtime ORDERING alone cannot catch a file replaced by a copy that preserved
+    the source's mtime (shutil.copy2, Windows Explorer). Callers that can record
+    a fingerprint of their inputs should ALSO compare it — see file_fingerprint.
     """
     cache_path = Path(cache)
     if not cache_path.exists() or cache_path.stat().st_size == 0:
@@ -81,6 +87,34 @@ def is_cache_fresh(cache: str | Path, *inputs: str | Path) -> bool:
     if newest is None:
         return True
     return cache_path.stat().st_mtime >= newest
+
+
+def file_fingerprint(path: str | Path) -> Optional[dict]:
+    """Cheap identity for a cache input: size + mtime, JSON-safe.
+
+    Equality against a RECORDED fingerprint catches what mtime ordering cannot:
+    a file swapped for a copy that kept the original's mtime. None when the
+    file does not exist, so "no lyrics.txt" compares equal to "still none".
+    The mtime is rounded so the value survives a JSON round trip exactly.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    st = p.stat()
+    return {"bytes": st.st_size, "mtime": round(st.st_mtime, 3)}
+
+
+def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> Path:
+    """Write via a sibling temp file and os.replace, so a crash mid-write (or a
+    reader arriving mid-write — the JUCE app re-reads chart.json) can never see
+    a truncated file where a good one was."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding=encoding, newline="\n") as fh:
+        fh.write(text)
+    os.replace(tmp, p)
+    return p
 
 
 @dataclass(frozen=True)

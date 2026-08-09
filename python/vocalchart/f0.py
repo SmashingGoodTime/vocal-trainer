@@ -417,6 +417,29 @@ def load_f0_cache(cache_path: str | Path) -> F0Result:
         )
 
 
+def _source_changed(meta: dict, audio_path: str | Path) -> bool:
+    """True when the audio no longer matches what the cache was computed from.
+
+    Mtime ORDERING alone cannot catch this: shutil.copy2 and a Windows Explorer
+    copy both preserve the source file's original mtime, so a hand-replaced
+    stems/vocals.wav can be OLDER than the cache while being different audio.
+    Equality against the stat recorded at analysis time is what detects a swap.
+    """
+    recorded_mtime = meta.get("sourceMtime")
+    recorded_bytes = meta.get("sourceBytes")
+
+    if recorded_mtime is None or recorded_bytes is None:
+        return False                    # legacy cache: no fingerprint, no opinion
+
+    try:
+        st = Path(audio_path).stat()
+    except OSError:
+        return True
+
+    return (int(recorded_bytes) != st.st_size
+            or abs(float(recorded_mtime) - st.st_mtime) > 1e-3)
+
+
 def f0_for_song(
     song,                       # paths.SongPaths, imported lazily to avoid a cycle
     force: bool = False,
@@ -453,11 +476,12 @@ def f0_for_song(
                 cached.meta.get("format") != F0_CACHE_FORMAT
                 or abs(cached.fmin_hz - fmin_hz) > 1e-9
                 or abs(cached.fmax_hz - fmax_hz) > 1e-9
+                or _source_changed(cached.meta, audio_path)
             )
             if not stale:
                 say(f"f0 cache hit: {cache_path} ({len(cached)} frames)")
                 return cached
-            say("f0 cache was written with different settings; recomputing")
+            say("f0 cache does not match the current audio/settings; recomputing")
 
     f0 = analyse_f0(
         audio_path,

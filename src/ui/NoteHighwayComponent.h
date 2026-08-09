@@ -148,6 +148,21 @@ public:
 
     void setTolerances (float tFullCents, float tZeroCents) noexcept;
 
+    //== The view range, published for the piano keyboard =====================
+    /** The animated vertical view, in MIDI. The keyboard beside the highway
+        draws from these so a key is always at exactly the same height as the
+        row it names — reproducing the mapping on the other side would be two
+        copies of one truth, and they would drift the first time the zoom
+        animation changed. */
+    float getViewLowMidi()  const noexcept { return viewLowMidi; }
+    float getViewHighMidi() const noexcept { return viewHighMidi; }
+
+    /** Note-name labels in the highway's own left gutter. Switched OFF when the
+        piano keyboard is showing: the keyboard labels the same pitches a few
+        pixels to the left, and two columns of note names beside each other is
+        clutter that says nothing the first one did not. */
+    void setGutterLabelsVisible (bool shouldShow);
+
     /** Advances the zoom animation. Call once per vblank BEFORE repainting;
         `dt` is the elapsed wall-clock time in seconds. */
     void tickAnimation (double dt) noexcept;
@@ -192,6 +207,25 @@ private:
         void paint (juce::Graphics&) override;
 
     private:
+        /** One grid line per semitone, with note names in the gutter. */
+        void paintChromaticGrid (juce::Graphics&, juce::Rectangle<float>, float alpha);
+
+        /** Treble and bass staves at their TRUE PITCH HEIGHTS, plus the ledger
+            lines a singer actually meets and a reduced clef marker for each. */
+        void paintStaff (juce::Graphics&, juce::Rectangle<float>);
+
+        /** The G of the G-clef / the F and its two dots of the F-clef, drawn on
+            the line each clef names.
+
+            A REDUCTION OF THE GLYPH, NOT AN IMITATION OF IT. The real clefs are
+            elaborate paths, and the Unicode musical symbols (U+1D11E, U+1D122)
+            are not in any font Windows ships by default — a missing-glyph box
+            where the clef should be would teach the wrong thing quite firmly.
+            What a clef MEANS is "this line is this note", and that is exactly
+            what the letter on the line says. */
+        void paintClef (juce::Graphics&, juce::Rectangle<float>, int anchorMidi,
+                        const char* letter, bool withDots);
+
         NoteHighwayComponent& owner;
     };
 
@@ -221,6 +255,18 @@ private:
     void paintTrace (juce::Graphics&, juce::Rectangle<float> area);
     void paintSelection (juce::Graphics&, float x0, float cy, float w, float haloHeight);
 
+    /** The note's name, drawn on the bar as it goes past.
+
+        `interior` is the fill the bar was drawn with, ALPHA INCLUDED — the label
+        colour is derived by blending it over the background and taking the
+        contrasting one, so the name stays readable on a solid active bar, a 35%
+        upcoming one and a hollow outline alike, in every preset. Picking a fixed
+        label colour instead means choosing which of those five themes it is
+        illegible in. */
+    void paintNoteName (juce::Graphics&, const ChartNote&, float x0, float w,
+                        float cy, float barHeight, juce::Colour interior,
+                        float alphaScale);
+
     //==========================================================================
     Theme& theme;
     const Chart* chart = nullptr;
@@ -228,6 +274,7 @@ private:
 
     bool editMode = false;
     int  selectedNoteId = -1;
+    bool gutterLabels = true;
 
     BackgroundLayer background { *this };
 

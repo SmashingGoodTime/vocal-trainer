@@ -315,10 +315,17 @@ def chart_to_ultrastar_text(
 
 
 def write_ultrastar(chart: Any, path: str, **kwargs: Any) -> str:
-    """Write ``chart.ultrastar.txt``.  UTF-8, **no BOM**, line endings preserved."""
+    """Write ``chart.ultrastar.txt``.  UTF-8, **no BOM**, line endings preserved.
+
+    Atomic (temp + os.replace), like chart.json: this file is hand-edited in
+    external tools, and half a file is worse than the old file."""
+    import os
+
     text = chart_to_ultrastar_text(chart, **kwargs)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
+    os.replace(tmp, path)
     return text
 
 

@@ -89,6 +89,35 @@ public:
     bool getMonitorEnabled() const;
     void setMonitorEnabled (bool);
 
+    //== Latency compensation =================================================
+    /** OUTPUT latency: how long audio takes to get from the buffer this app
+        writes to the singer's EARS. Shifts the highway and the lyric strip back
+        by this much, so what is on the now-line is what is in the headphones.
+
+        INPUT latency: how long the singer's voice takes to get from their mouth
+        into the buffer this app reads. Shifts the microphone trace and the
+        scorer back by this much ON TOP of the output figure — a sung note is
+        late by the whole ROUND TRIP, because the singer only started singing it
+        after hearing a cue that was itself already late.
+
+        Both default to ZERO, which is the correct value for the wired
+        interface this app was built against and means an existing install
+        behaves exactly as before. They exist for Bluetooth headphones, where
+        the delay is 150-250 ms and no driver on Windows reports it.
+
+        Milliseconds, and always >= 0: these are physical delays, so there is no
+        such thing as compensating in the other direction. */
+    int  getOutputLatencyMs() const;
+    void setOutputLatencyMs (int ms);
+
+    int  getInputLatencyMs() const;
+    void setInputLatencyMs (int ms);
+
+    /** The largest offset the UI offers. 500 ms is past the worst Bluetooth
+        stack and far past the point where singing in time is possible at all;
+        it is a guard against a typo, not a target. */
+    static constexpr int kMaxLatencyMs = 500;
+
     //== Exercises ============================================================
     /** Remembered so the next warm-up starts where the last one left off. */
     int  getExerciseRootMidi() const;

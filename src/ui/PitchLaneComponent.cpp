@@ -11,6 +11,8 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>   // juce::MidiMessage::getMidiNoteName
 
+#include "NoteNaming.h"                            // vt::kOctaveNumberForMiddleC
+
 #include <algorithm>
 #include <cmath>
 
@@ -19,10 +21,6 @@ namespace vt
 
 namespace
 {
-    /** Ableton Live shows middle C (MIDI 60) as C3, so match it. Anything else
-        makes the note selector disagree with the DAW the user is staring at. */
-    constexpr int kOctaveNumberForMiddleC = 3;
-
     /** A gap larger than this between consecutive estimates means the analysis
         stream itself stalled, so the polyline must break. Three hops at 8 ms. */
     constexpr double kMaxSegmentGapSeconds = 0.024 * 2.0;

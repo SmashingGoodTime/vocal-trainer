@@ -276,6 +276,24 @@ void Chart::finalise()
                [] (const ChartNote& a, const ChartNote& b)
                { return a.startSeconds < b.startSeconds; });
 
+    // Normalise MICROSCOPIC overlaps left by writers that round start and
+    // duration separately (the pipeline serialises both to 6 decimals): two
+    // touching notes can arrive with prev.end a few 1e-16 above next.start.
+    // The editor's clamps and the scorer's note lookup assume strict
+    // non-overlap, so snap the boundary rather than trusting the dust.
+    // Anything past a millisecond is real data and is left alone.
+    for (size_t i = 1; i < notes.size(); ++i)
+    {
+        const auto prevEnd = notes[i - 1].endSeconds();
+        const auto overlap = prevEnd - notes[i].startSeconds;
+
+        if (overlap > 0.0 && overlap <= 0.001)
+        {
+            notes[i].durationSeconds = juce::jmax (0.001, notes[i].durationSeconds - overlap);
+            notes[i].startSeconds    = prevEnd;
+        }
+    }
+
     std::sort (phrases.begin(), phrases.end(),
                [] (const ChartPhrase& a, const ChartPhrase& b)
                { return a.startSeconds < b.startSeconds; });

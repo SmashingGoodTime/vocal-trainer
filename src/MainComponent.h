@@ -27,6 +27,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <functional>
+#include <limits>
 
 #include "AudioEngine.h"
 #include "app/AppSettings.h"
@@ -39,9 +41,12 @@
 #include "ui/ImportOverlayComponent.h"
 #include "ui/LyricStripComponent.h"
 #include "ui/NoteHighwayComponent.h"
+#include "ui/NoteNaming.h"
+#include "ui/PianoKeyboardComponent.h"
 #include "ui/PitchLaneComponent.h"
 #include "ui/ReviewOverlayComponent.h"
 #include "ui/Theme.h"
+#include "ui/TransportBarComponent.h"
 
 namespace vt
 {
@@ -82,6 +87,30 @@ private:
     void pushMonitorLevel();
     void seekSong (double chartSeconds);
 
+    //== Scrubbing and section looping ========================================
+    /** Pushes the loop into the transport bar and syncs the Loop button. */
+    void setLoop (double startSeconds, double endSeconds, bool enabled);
+
+    /** The Loop button. Arming with no region yet picks the phrase the playhead
+        is in — the section you want to drill is almost always the one you just
+        sang, and making the user draw a region before the button does anything
+        would be a control that appears broken the first time it is pressed. */
+    void toggleLoop();
+
+    /** Start and end of the phrase containing `t`, falling back to a fixed
+        window around it when the chart has no phrases. Returns false when there
+        is nothing sensible to loop. */
+    bool phraseRangeAt (double t, double& start, double& end) const;
+
+    /** Wraps the playhead when a running take reaches the end of the loop.
+        Called from the vblank. Returns true if it seeked. */
+    bool applyLoopWrap();
+
+    /** Jumps back by kRewindSeconds, clamped at zero (or at the loop start
+        while a loop is armed — a rewind out of the section you are drilling is
+        not a rewind, it is losing your place). */
+    void rewind();
+
     //== Exercises =============================================================
     void showExerciseMenu();
     void loadExercise (const ExerciseSpec&);
@@ -93,6 +122,10 @@ private:
         are actually singing. */
     void showOverflowMenu();
 
+    /** The built-in themes, off the overflow menu. Picking one REWRITES
+        theme.json — see Theme::applyPreset. */
+    void showThemeMenu();
+
     /** Monitor and Guide levels, in a call-out under the Levels button.
 
         They are sliders and sliders are wide — the two of them were most of a
@@ -102,6 +135,28 @@ private:
         once a session, not once a phrase. */
     void showLevelsPanel();
     void layoutLevelsPanel();
+
+    /** Output and input latency offsets, in a call-out off the overflow menu.
+
+        Behind the overflow rather than on the toolbar because calibrating is a
+        thing you do ONCE per set of headphones, not once a session — and the
+        toolbar is what the singer looks at while they are actually singing. */
+    void showLatencyPanel();
+    void layoutLatencyPanel();
+
+    /** Reads the two sliders into the cached seconds values and persists them. */
+    void pushLatencyOffsets();
+
+    /** Fills the sliders in from whatever the audio driver reports.
+
+        Only ever a STARTING POINT. A driver reports its own buffering; it knows
+        nothing about what happens after the samples leave it, so on Bluetooth
+        this recovers a few milliseconds out of a couple of hundred. */
+    void fillLatencyFromDriver();
+
+    /** Shows `panel` in a CallOutBox anchored to `anchor`, owned by `slot`. */
+    void showCallout (juce::Component& panel, const juce::Component& anchor,
+                      std::unique_ptr<juce::CallOutBox>& slot);
 
     /** True when the controls need a second row: chart mode on a window too
         narrow to hold the transport beside the library buttons. */
@@ -137,6 +192,19 @@ private:
         timebase the pitch samples are stamped in. */
     double currentChartTime() const noexcept;
 
+    /** Chart time the singer is EXPERIENCING: currentChartTime() less the
+        output-latency offset, because audio written to the buffer now does not
+        reach their ears until later.
+
+        Kept separate from currentChartTime() rather than folded into it, and
+        that separation is load-bearing. currentChartTime() is transport TRUTH
+        and is what pause, resume, seek and the end-of-take test are written
+        against; pausing into a compensated value and resuming out of it would
+        walk the song backwards by the offset on every pause. So: anything the
+        singer looks at or is scored against uses this one, anything that moves
+        the transport uses the raw one. */
+    double perceivedChartTime() const noexcept;
+
     //==========================================================================
     AudioEngine& engine;
     juce::SharedResourcePointer<Theme> theme;
@@ -144,6 +212,8 @@ private:
 
     PitchLaneComponent lane;
     NoteHighwayComponent highway { *theme };
+    PianoKeyboardComponent keyboard { *theme };
+    TransportBarComponent transportBar { *theme };
     LyricStripComponent lyricStrip { *theme };
     ImportOverlayComponent importOverlay { *theme };
     ReviewOverlayComponent reviewOverlay { *theme };
@@ -166,6 +236,14 @@ private:
     double songAnchorStream = 0.0;    // stream seconds at chart t=0
     double pausedChartTime = 0.0;
     double lastAnimationStream = 0.0;
+
+    /** The section being drilled. `loopEnd <= loopStart` means no region.
+
+        Held here rather than read back off the transport bar because the bar is
+        a VIEW — it is hidden by the theme, and by free-sing mode, and looping
+        must not stop working because the strip that draws it is not on screen. */
+    double loopStartSeconds = 0.0, loopEndSeconds = 0.0;
+    bool   loopEnabled = false;
 
     /** True when the loaded chart was GENERATED rather than read from a file.
         It has no chart.json behind it, so saving an edit needs a destination
@@ -207,6 +285,8 @@ private:
     juce::TextButton exerciseButton { "Exercises..." };
     juce::TextButton playButton { "Play" };
     juce::TextButton restartButton { "|<" };
+    juce::TextButton rewindButton { "<<" };
+    juce::TextButton loopButton { "Loop" };
     juce::TextButton levelsButton { "Levels" };
     juce::TextButton recordButton { "Rec" };
     juce::TextButton listenButton { "Listen" };
@@ -214,22 +294,29 @@ private:
     juce::TextButton overflowButton { "..." };
     juce::Label  footerLabel;
 
-    //== The levels call-out ===================================================
-    /** Holds the four level controls so they can be shown together. A named
-        class rather than a bare Component only so that resizing it lays its
-        children out — the editor owns the layout, as it does for everything
-        else on the toolbar. */
-    class LevelsPanel final : public juce::Component
+    //== The call-outs =========================================================
+    /** Holds a group of controls so they can be shown together in a call-out. A
+        named class rather than a bare Component only so that resizing it lays
+        its children out — the editor owns the layout, as it does for everything
+        else on the toolbar.
+
+        ONE class taking a layout function, rather than one class per call-out:
+        a second near-copy of the same four lines is how the two would drift
+        apart. */
+    class CalloutPanel final : public juce::Component
     {
     public:
-        explicit LevelsPanel (MainComponent& o) : owner (o) {}
-        void resized() override { owner.layoutLevelsPanel(); }
+        explicit CalloutPanel (std::function<void()> layoutFn)
+            : layout (std::move (layoutFn)) {}
+
+        void resized() override { if (layout != nullptr) layout(); }
 
     private:
-        MainComponent& owner;
+        std::function<void()> layout;
     };
 
-    LevelsPanel levelsPanel { *this };
+    CalloutPanel levelsPanel  { [this] { layoutLevelsPanel(); } };
+    CalloutPanel latencyPanel { [this] { layoutLatencyPanel(); } };
 
     juce::ToggleButton monitorToggle { "Monitor" };
     juce::Slider monitorLevel { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
@@ -237,9 +324,22 @@ private:
     juce::Slider guideVocalLevel { juce::Slider::LinearHorizontal,
                                    juce::Slider::TextBoxRight };
 
-    /** Declared AFTER the panel it displays, so it is destroyed BEFORE it. A
-        CallOutBox constructed this way does not own its content. */
+    juce::Label  outputLatencyCaption;
+    juce::Slider outputLatency { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Label  inputLatencyCaption;
+    juce::Slider inputLatency { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::TextButton latencyDriverButton { "From driver" };
+    juce::Label  latencyHint;
+
+    /** Cached in SECONDS so the vblank does not touch PropertiesFile or a
+        Slider 60 times a second. Written only by pushLatencyOffsets(). */
+    double outputLatencySeconds = 0.0;
+    double inputLatencySeconds  = 0.0;
+
+    /** Declared AFTER the panels they display, so they are destroyed BEFORE
+        them. A CallOutBox constructed this way does not own its content. */
     std::unique_ptr<juce::CallOutBox> levelsCallout;
+    std::unique_ptr<juce::CallOutBox> latencyCallout;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> noteAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>   freeSingAttachment;
@@ -257,6 +357,11 @@ private:
 
     double lastEstimateTime  = 0.0;
     bool   haveLastEstimate  = false;
+
+    /** Newest smoothed pitch of the drain, in TRUE fractional MIDI (NaN when
+        unvoiced). The keyboard's marker needs the unfolded value — see the
+        vblank. */
+    float  newestSmoothedMidi = std::numeric_limits<float>::quiet_NaN();
     juce::uint32 lastFooterUpdateMs = 0;
     bool   suppressToleranceSync = true;   // don't clobber saved state on first load
 

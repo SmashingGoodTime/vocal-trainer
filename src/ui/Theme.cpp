@@ -94,6 +94,233 @@ juce::Colour lerpOklab (juce::Colour a, juce::Colour b, float t) noexcept
 }
 
 //==============================================================================
+// Background style <-> string
+//==============================================================================
+
+BackgroundStyle backgroundStyleFromString (const juce::String& s) noexcept
+{
+    const auto t = s.trim().toLowerCase();
+
+    if (t == "staff")          return BackgroundStyle::staff;
+    if (t == "staffandgrid")   return BackgroundStyle::staffAndGrid;
+    if (t == "plain")          return BackgroundStyle::plain;
+
+    return BackgroundStyle::chromatic;
+}
+
+const char* backgroundStyleToString (BackgroundStyle s) noexcept
+{
+    switch (s)
+    {
+        case BackgroundStyle::staff:        return "staff";
+        case BackgroundStyle::staffAndGrid: return "staffAndGrid";
+        case BackgroundStyle::plain:        return "plain";
+        case BackgroundStyle::chromatic:    break;
+    }
+
+    return "chromatic";
+}
+
+//==============================================================================
+// Presets
+//==============================================================================
+//
+// A preset is a complete ThemeValues, not a patch over the defaults, so reading
+// one tells you exactly what you get. They are data and nothing branches on
+// which one is active.
+//
+// ONLY "Midnight" AND "Sheet Music" CARRY THE COLOUR-VISION GUARANTEE.
+// DESIGN.md §7 picks the Okabe-Ito palette because vermilion #D55E00 against
+// bluish green #009E73 stays separable under all three common dichromacies, and
+// those two presets keep that pair. "Neon" deliberately does not — it is a
+// preference, and the geometry (inside the bar / outside the bar) still carries
+// the signal on its own, which is why hue was never allowed to be load-bearing.
+//
+//==============================================================================
+
+namespace
+{
+    ThemeValues makeSheetMusic()
+    {
+        ThemeValues v;
+
+        v.presetName = "Sheet Music";
+        v.backgroundStyle = BackgroundStyle::staff;
+
+        v.background        = juce::Colour (0xfff7f3e8);   // warm paper
+        v.panel             = juce::Colour (0xffeae4d4);
+        v.gridLine          = juce::Colour (0xffd6ceb8);
+        v.gridLineOctave    = juce::Colour (0xffc3b99e);
+        v.gridLabel         = juce::Colour (0xff7a7263);
+        v.staffLine         = juce::Colour (0xff2e2a24);   // ink
+        v.staffLedger       = juce::Colour (0xff8a8272);
+        v.targetBarActive   = juce::Colour (0xff1f6fb2);
+        v.targetBarUpcoming = juce::Colour (0xff5e8cb5);
+        v.goldenNote        = juce::Colour (0xffb77a00);
+        v.traceInTune       = juce::Colour (0xff00734f);
+        v.traceOutOfTune    = juce::Colour (0xffb8460a);
+        v.ghostContour      = juce::Colour (0xff6e6656);
+
+        // #F0E442 is a lyric colour chosen against #101014. On paper it is
+        // barely there, so the light presets re-pick it rather than inherit it.
+        v.lyricSung         = juce::Colour (0xff8a6a00);
+        v.lyricPending      = juce::Colour (0xff8a8272);
+        v.lyricActiveWipe   = juce::Colour (0xff1a1712);
+
+        v.text              = juce::Colour (0xff241f18);
+        v.textDim           = juce::Colour (0xff6e6656);
+        v.nowLine           = juce::Colour (0xffb03a2e);
+        v.noteScoredGood    = juce::Colour (0xff00734f);
+        v.noteScoredPoor    = juce::Colour (0xffb8460a);
+        v.noteNotSung       = juce::Colour (0xffb5ad9b);
+        v.editSelection     = juce::Colour (0xffb77a00);
+
+        v.pianoWhiteKey     = juce::Colour (0xfffffdf6);
+        v.pianoBlackKey     = juce::Colour (0xff2e2a24);
+        v.pianoKeyBorder    = juce::Colour (0xffb9b09a);
+        v.pianoLabel        = juce::Colour (0xff5a5347);
+
+        v.transportTrack    = juce::Colour (0xffe4ddca);
+        v.transportDensity  = juce::Colour (0xffb6ac93);
+        v.transportPlayhead = juce::Colour (0xffb03a2e);
+        v.loopRegion        = juce::Colour (0xff1f6fb2);
+
+        // Alphas tuned for a LIGHT background. 35% of a mid blue over #101014
+        // is a visible bar; the same 35% over paper is a smudge.
+        v.upcomingBarAlpha    = 0.50f;
+        v.haloAlpha           = 0.16f;
+        v.ghostContourAlpha   = 0.35f;
+        v.trailStartAlpha     = 0.70f;
+        v.loopRegionAlpha     = 0.20f;
+
+        return v;
+    }
+
+    ThemeValues makeStaffDark()
+    {
+        ThemeValues v;                       // the Midnight palette, unchanged
+
+        v.presetName = "Staff Dark";
+        v.backgroundStyle = BackgroundStyle::staffAndGrid;
+        v.staffLine   = juce::Colour (0xff7e7e92);
+        v.staffLedger = juce::Colour (0xff4a4a58);
+
+        return v;
+    }
+
+    ThemeValues makeHighContrast()
+    {
+        ThemeValues v;
+
+        v.presetName = "High Contrast";
+
+        v.background        = juce::Colour (0xff000000);
+        v.panel             = juce::Colour (0xff0a0a0a);
+        v.gridLine          = juce::Colour (0xff3c3c3c);
+        v.gridLineOctave    = juce::Colour (0xff6e6e6e);
+        v.gridLabel         = juce::Colour (0xffd0d0d0);
+        v.staffLine         = juce::Colour (0xffb0b0b0);
+        v.staffLedger       = juce::Colour (0xff6e6e6e);
+        v.targetBarActive   = juce::Colour (0xff00b7ff);
+        v.targetBarUpcoming = juce::Colour (0xff0072b2);
+        v.traceInTune       = juce::Colour (0xff00e58c);
+        v.traceOutOfTune    = juce::Colour (0xffff6a00);
+        v.noteScoredGood    = juce::Colour (0xff00e58c);
+        v.noteScoredPoor    = juce::Colour (0xffff6a00);
+        v.noteNotSung       = juce::Colour (0xff5a5a5a);
+        v.text              = juce::Colour (0xffffffff);
+        v.textDim           = juce::Colour (0xffc0c0c0);
+        v.nowLine           = juce::Colour (0xffffffff);
+
+        // The ONE preset that keeps a photographic keyboard. Everywhere else the
+        // keys are toned down to sit inside the theme; here contrast IS the
+        // theme, and a low-vision user reading a reference needs the maximum
+        // separation the display can give.
+        v.pianoWhiteKey     = juce::Colour (0xffffffff);
+        v.pianoBlackKey     = juce::Colour (0xff000000);
+        v.pianoKeyBorder    = juce::Colour (0xff6e6e6e);
+        v.pianoLabel        = juce::Colour (0xff000000);
+
+        v.transportTrack    = juce::Colour (0xff141414);
+        v.transportDensity  = juce::Colour (0xff5a5a5a);
+
+        // Everything thicker and larger. Low vision is the case this exists for,
+        // and a 1 px grid line at 25% is exactly what it cannot resolve.
+        v.gridLineThicknessPx   = 1.6f;
+        v.gridLineOctaveThickPx = 2.4f;
+        v.gridLabelHeightPx     = 13.0f;
+        v.staffLineThicknessPx  = 2.0f;
+        v.trailThicknessPx      = 3.0f;
+        v.trailStartAlpha       = 0.85f;
+        v.dotDiameterPx         = 9.0f;
+        v.upcomingBarAlpha      = 0.50f;
+        v.haloAlpha             = 0.18f;
+        v.noteNameHeightPx      = 12.0f;
+
+        return v;
+    }
+
+    ThemeValues makeNeon()
+    {
+        ThemeValues v;
+
+        v.presetName = "Neon";
+
+        v.background        = juce::Colour (0xff0b0714);
+        v.panel             = juce::Colour (0xff150e24);
+        v.gridLine          = juce::Colour (0xff2a1e44);
+        v.gridLineOctave    = juce::Colour (0xff4a3570);
+        v.gridLabel         = juce::Colour (0xff8a7acf);
+        v.staffLine         = juce::Colour (0xff6a55a0);
+        v.staffLedger       = juce::Colour (0xff3a2e58);
+        v.targetBarActive   = juce::Colour (0xff00e5ff);
+        v.targetBarUpcoming = juce::Colour (0xff7a4dff);
+        v.goldenNote        = juce::Colour (0xffffc400);
+        v.traceInTune       = juce::Colour (0xff39ff9e);
+        v.traceOutOfTune    = juce::Colour (0xffff3d81);
+        v.ghostContour      = juce::Colour (0xff9a8acf);
+        v.lyricSung         = juce::Colour (0xffffe94a);
+        v.lyricPending      = juce::Colour (0xff7a6ba8);
+        v.text              = juce::Colour (0xffede7ff);
+        v.textDim           = juce::Colour (0xff9a8acf);
+        v.nowLine           = juce::Colour (0xffff3d81);
+        v.noteScoredGood    = juce::Colour (0xff39ff9e);
+        v.noteScoredPoor    = juce::Colour (0xffff3d81);
+        v.noteNotSung       = juce::Colour (0xff3a2e58);
+        v.editSelection     = juce::Colour (0xffffe94a);
+
+        v.pianoWhiteKey     = juce::Colour (0xff241a3c);
+        v.pianoBlackKey     = juce::Colour (0xff0a0614);
+        v.pianoKeyBorder    = juce::Colour (0xff3a2e58);
+        v.pianoLabel        = juce::Colour (0xff9a8acf);
+
+        v.transportTrack    = juce::Colour (0xff150e24);
+        v.transportDensity  = juce::Colour (0xff4a3570);
+        v.transportPlayhead = juce::Colour (0xffffe94a);
+        v.loopRegion        = juce::Colour (0xff00e5ff);
+
+        v.trailStartAlpha   = 0.75f;
+
+        return v;
+    }
+}
+
+juce::StringArray Theme::getPresetNames()
+{
+    return { "Midnight", "Sheet Music", "Staff Dark", "High Contrast", "Neon" };
+}
+
+ThemeValues Theme::getPreset (const juce::String& name)
+{
+    if (name == "Sheet Music")   return makeSheetMusic();
+    if (name == "Staff Dark")    return makeStaffDark();
+    if (name == "High Contrast") return makeHighContrast();
+    if (name == "Neon")          return makeNeon();
+
+    return {};     // "Midnight" — the compiled-in DESIGN.md values
+}
+
+//==============================================================================
 // JSON helpers — every one of these falls back rather than throwing.
 //==============================================================================
 
@@ -164,6 +391,16 @@ namespace
             return ((double) v) != 0.0;
 
         return fallback;
+    }
+
+    juce::String readString (const juce::var& obj, const char* key, const juce::String& fallback)
+    {
+        if (obj.getDynamicObject() == nullptr)
+            return fallback;
+
+        const auto v = obj.getProperty (juce::Identifier (key), juce::var());
+
+        return v.isString() ? v.toString().trim() : fallback;
     }
 
     /** Accepts "#RRGGBB", "#AARRGGBB", "RRGGBB", "AARRGGBB". Anything else -> fallback. */
@@ -261,8 +498,11 @@ juce::File Theme::getThemeFile()
 
 bool Theme::writeDefaultsToFile() const
 {
-    const ThemeValues d;
+    return writeValuesToFile (ThemeValues {});
+}
 
+bool Theme::writeValuesToFile (const ThemeValues& d)
+{
     juce::DynamicObject::Ptr colours (new juce::DynamicObject());
     setProp (colours, "background",        colourToString (d.background));
     setProp (colours, "panel",             colourToString (d.panel));
@@ -285,6 +525,16 @@ bool Theme::writeDefaultsToFile() const
     setProp (colours, "noteScoredPoor",    colourToString (d.noteScoredPoor));
     setProp (colours, "noteNotSung",       colourToString (d.noteNotSung));
     setProp (colours, "editSelection",     colourToString (d.editSelection));
+    setProp (colours, "staffLine",         colourToString (d.staffLine));
+    setProp (colours, "staffLedger",       colourToString (d.staffLedger));
+    setProp (colours, "pianoWhiteKey",     colourToString (d.pianoWhiteKey));
+    setProp (colours, "pianoBlackKey",     colourToString (d.pianoBlackKey));
+    setProp (colours, "pianoKeyBorder",    colourToString (d.pianoKeyBorder));
+    setProp (colours, "pianoLabel",        colourToString (d.pianoLabel));
+    setProp (colours, "transportTrack",    colourToString (d.transportTrack));
+    setProp (colours, "transportDensity",  colourToString (d.transportDensity));
+    setProp (colours, "transportPlayhead", colourToString (d.transportPlayhead));
+    setProp (colours, "loopRegion",        colourToString (d.loopRegion));
 
     juce::DynamicObject::Ptr lane (new juce::DynamicObject());
     setProp (lane, "headerHeight",          d.headerHeight);
@@ -314,6 +564,25 @@ bool Theme::writeDefaultsToFile() const
     setProp (highway, "ghostContourThicknessPx", d.ghostContourThicknessPx);
     setProp (highway, "scoredBarAlpha",          d.scoredBarAlpha);
     setProp (highway, "showScoredNotes",         d.showScoredNotes);
+    setProp (highway, "backgroundStyle",         juce::String (backgroundStyleToString (d.backgroundStyle)));
+    setProp (highway, "staffLineThicknessPx",    d.staffLineThicknessPx);
+    setProp (highway, "staffLedgerThicknessPx",  d.staffLedgerThicknessPx);
+    setProp (highway, "staffGridAlpha",          d.staffGridAlpha);
+    setProp (highway, "showNoteNames",           d.showNoteNames);
+    setProp (highway, "noteNameShowOctave",      d.noteNameShowOctave);
+    setProp (highway, "noteNameHeightPx",        d.noteNameHeightPx);
+    setProp (highway, "noteNameMinBarWidthPx",   d.noteNameMinBarWidthPx);
+    setProp (highway, "noteNameAlpha",           d.noteNameAlpha);
+
+    juce::DynamicObject::Ptr piano (new juce::DynamicObject());
+    setProp (piano, "showPianoKeyboard",  d.showPianoKeyboard);
+    setProp (piano, "widthPx",            d.pianoWidthPx);
+    setProp (piano, "blackKeyWidth",      d.pianoBlackKeyWidth);
+
+    juce::DynamicObject::Ptr transport (new juce::DynamicObject());
+    setProp (transport, "showTransportBar", d.showTransportBar);
+    setProp (transport, "heightPx",         d.transportBarHeight);
+    setProp (transport, "loopRegionAlpha",  d.loopRegionAlpha);
 
     juce::DynamicObject::Ptr trace (new juce::DynamicObject());
     setProp (trace, "trailMs",              d.trailMs);
@@ -341,10 +610,15 @@ bool Theme::writeDefaultsToFile() const
     juce::DynamicObject::Ptr root (new juce::DynamicObject());
     setProp (root, "_comment", juce::String ("Vocal Trainer theme. Saved changes are picked up within 250 ms; "
                                              "no rebuild needed. Delete this file to restore defaults. "
-                                             "Colours are #RRGGBB or #AARRGGBB."));
+                                             "Colours are #RRGGBB or #AARRGGBB. 'preset' names the built-in "
+                                             "theme this started from and is only used to tick the Theme menu; "
+                                             "picking a preset REPLACES this file."));
+    setProp (root, "preset",    d.presetName);
     setProp (root, "colours",   juce::var (colours.get()));
     setProp (root, "lane",      juce::var (lane.get()));
     setProp (root, "highway",   juce::var (highway.get()));
+    setProp (root, "piano",     juce::var (piano.get()));
+    setProp (root, "transport", juce::var (transport.get()));
     setProp (root, "trace",     juce::var (trace.get()));
     setProp (root, "tolerance", juce::var (tol.get()));
     setProp (root, "smoothing", juce::var (smoothing.get()));
@@ -355,6 +629,33 @@ bool Theme::writeDefaultsToFile() const
         return false;
 
     return file.replaceWithText (juce::JSON::toString (juce::var (root.get()), false, 6));
+}
+
+void Theme::adoptValues (const ThemeValues& newValues)
+{
+    values = newValues;
+    sendChangeMessage();
+}
+
+bool Theme::applyPreset (const juce::String& name)
+{
+    const auto preset = getPreset (name);
+
+    if (! writeValuesToFile (preset))
+        return false;
+
+    // Adopt the file's stamps NOW so the 4 Hz poll does not see its own write as
+    // a user edit and reload-and-broadcast a second time a quarter of a second
+    // later. The values would be identical, but the second broadcast rebuilds
+    // every buffered layer in the UI for nothing.
+    const auto file = getThemeFile();
+    seenModTime   = file.getLastModificationTime();
+    seenSize      = file.getSize();
+    changePending = false;
+    parseError    = false;
+
+    adoptValues (preset);
+    return true;
 }
 
 bool Theme::reloadNow()
@@ -383,12 +684,26 @@ bool Theme::loadFrom (const juce::File& file)
         return false;
     }
 
-    const ThemeValues d;                 // defaults, used for every missing key
-    ThemeValues v;
+    //--------------------------------------------------------------------------
+    // THE FALLBACK BASE IS THE NAMED PRESET, NOT THE COMPILED-IN DEFAULTS.
+    //
+    // Every key is optional, so a theme.json containing nothing but
+    //     { "preset": "Sheet Music" }
+    // is a complete, valid theme — which is the whole point of naming presets in
+    // the file rather than only in a menu. Falling back to Midnight instead
+    // would hand back a dark grid with a couple of paper-coloured strays in it.
+    //--------------------------------------------------------------------------
+    const auto presetName = readString (root, "preset", ThemeValues {}.presetName);
+    const auto d = getPreset (presetName);
+
+    ThemeValues v = d;
+    v.presetName = presetName;
 
     const auto colours   = childObject (root, "colours");
     const auto lane      = childObject (root, "lane");
     const auto highway   = childObject (root, "highway");
+    const auto piano     = childObject (root, "piano");
+    const auto transport = childObject (root, "transport");
     const auto trace     = childObject (root, "trace");
     const auto tol       = childObject (root, "tolerance");
     const auto smoothing = childObject (root, "smoothing");
@@ -414,6 +729,16 @@ bool Theme::loadFrom (const juce::File& file)
     v.noteScoredPoor    = readColour (colours, "noteScoredPoor",    d.noteScoredPoor);
     v.noteNotSung       = readColour (colours, "noteNotSung",       d.noteNotSung);
     v.editSelection     = readColour (colours, "editSelection",     d.editSelection);
+    v.staffLine         = readColour (colours, "staffLine",         d.staffLine);
+    v.staffLedger       = readColour (colours, "staffLedger",       d.staffLedger);
+    v.pianoWhiteKey     = readColour (colours, "pianoWhiteKey",     d.pianoWhiteKey);
+    v.pianoBlackKey     = readColour (colours, "pianoBlackKey",     d.pianoBlackKey);
+    v.pianoKeyBorder    = readColour (colours, "pianoKeyBorder",    d.pianoKeyBorder);
+    v.pianoLabel        = readColour (colours, "pianoLabel",        d.pianoLabel);
+    v.transportTrack    = readColour (colours, "transportTrack",    d.transportTrack);
+    v.transportDensity  = readColour (colours, "transportDensity",  d.transportDensity);
+    v.transportPlayhead = readColour (colours, "transportPlayhead", d.transportPlayhead);
+    v.loopRegion        = readColour (colours, "loopRegion",        d.loopRegion);
 
     v.headerHeight          = juce::jlimit (0,     200,    readInt   (lane, "headerHeight",          d.headerHeight));
     v.controlsHeight        = juce::jlimit (0,     200,    readInt   (lane, "controlsHeight",        d.controlsHeight));
@@ -442,6 +767,26 @@ bool Theme::loadFrom (const juce::File& file)
     v.ghostContourThicknessPx  = juce::jlimit (0.25f, 8.0f,  readFloat (highway, "ghostContourThicknessPx", d.ghostContourThicknessPx));
     v.scoredBarAlpha           = juce::jlimit (0.0f,  1.0f,  readFloat (highway, "scoredBarAlpha",          d.scoredBarAlpha));
     v.showScoredNotes          =                             readBool  (highway, "showScoredNotes",         d.showScoredNotes);
+
+    v.backgroundStyle          = backgroundStyleFromString (
+                                     readString (highway, "backgroundStyle",
+                                                 backgroundStyleToString (d.backgroundStyle)));
+    v.staffLineThicknessPx     = juce::jlimit (0.25f, 8.0f,  readFloat (highway, "staffLineThicknessPx",    d.staffLineThicknessPx));
+    v.staffLedgerThicknessPx   = juce::jlimit (0.25f, 8.0f,  readFloat (highway, "staffLedgerThicknessPx",  d.staffLedgerThicknessPx));
+    v.staffGridAlpha           = juce::jlimit (0.0f,  1.0f,  readFloat (highway, "staffGridAlpha",          d.staffGridAlpha));
+    v.showNoteNames            =                             readBool  (highway, "showNoteNames",           d.showNoteNames);
+    v.noteNameShowOctave       =                             readBool  (highway, "noteNameShowOctave",      d.noteNameShowOctave);
+    v.noteNameHeightPx         = juce::jlimit (5.0f,  40.0f, readFloat (highway, "noteNameHeightPx",        d.noteNameHeightPx));
+    v.noteNameMinBarWidthPx    = juce::jlimit (0.0f, 400.0f, readFloat (highway, "noteNameMinBarWidthPx",   d.noteNameMinBarWidthPx));
+    v.noteNameAlpha            = juce::jlimit (0.0f,  1.0f,  readFloat (highway, "noteNameAlpha",           d.noteNameAlpha));
+
+    v.showPianoKeyboard        =                             readBool  (piano, "showPianoKeyboard",  d.showPianoKeyboard);
+    v.pianoWidthPx             = juce::jlimit (24,    400,   readInt   (piano, "widthPx",            d.pianoWidthPx));
+    v.pianoBlackKeyWidth       = juce::jlimit (0.15f, 1.0f,  readFloat (piano, "blackKeyWidth",      d.pianoBlackKeyWidth));
+
+    v.showTransportBar         =                             readBool  (transport, "showTransportBar", d.showTransportBar);
+    v.transportBarHeight       = juce::jlimit (12,    200,   readInt   (transport, "heightPx",         d.transportBarHeight));
+    v.loopRegionAlpha          = juce::jlimit (0.0f,  1.0f,  readFloat (transport, "loopRegionAlpha",  d.loopRegionAlpha));
 
     v.trailMs               = juce::jlimit (50,    5000,   readInt   (trace, "trailMs",              d.trailMs));
     v.ringMs                = juce::jlimit (v.trailMs, 20000, readInt (trace, "ringMs",              d.ringMs));

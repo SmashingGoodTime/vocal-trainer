@@ -154,14 +154,20 @@ def find_separator_python(explicit: Optional[str | Path] = None) -> Path:
         "\n"
         "Stage 0 needs torch, which is deliberately kept OUT of the analysis venv\n"
         "(pyproject.toml, and DESIGN.md:375 on the cuDNN/faster-whisper ordering trap).\n"
-        "Create the isolated one once:\n"
+        "Create the isolated one once — audio-separator FIRST, the pinned torch trio\n"
+        "LAST. The order is load-bearing (DESIGN.md 11.11): installing audio-separator\n"
+        "after torch lets pip resolve torchvision to a newer release and silently\n"
+        "replace the CUDA torch with a CPU build - separation then takes 20-40 min\n"
+        "instead of ~2 with only a dependency warning to show for it.\n"
         "\n"
         f"    py -3.11 -m venv {_repo_root() / '.venv-separate'}\n"
         f"    {_venv_python(_repo_root() / '.venv-separate')} -m pip install "
-        "torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126\n"
-        f"    {_venv_python(_repo_root() / '.venv-separate')} -m pip install "
         '"audio-separator[gpu]==0.44.5"\n'
+        f"    {_venv_python(_repo_root() / '.venv-separate')} -m pip install "
+        "torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 "
+        "--index-url https://download.pytorch.org/whl/cu126\n"
         "\n"
+        'Verify with:  python -c "import torch; print(torch.cuda.is_available())"\n'
         "No NVIDIA GPU? Use the /whl/cpu index and audio-separator[cpu] instead;\n"
         "separation then takes 20-40 min per song rather than 1-3.\n"
         f"Already have one elsewhere? Point {_ENV_PYTHON} at its python.exe."
@@ -356,7 +362,19 @@ def _run_driver(python: Path, *, audio: Path, out_dir: Path, model: str,
             last_status = str(event.get("message", "")) or last_status
             say(last_status)
 
+    # Tail of the child's stderr, kept ONLY for the failure report. Without it,
+    # anything that kills the driver before it can emit a JSON error event — a
+    # VOCALCHART_SEPARATOR_PYTHON pointing at the wrong interpreter, a missing
+    # VC runtime, a native CUDA abort — reported a bare exit code with the real
+    # error text thrown away.
+    stderr_tail: list[str] = []
+
     def on_stderr(line: str) -> None:
+        stripped = line.rstrip()
+        if stripped:
+            stderr_tail.append(stripped)
+            del stderr_tail[:-40]
+
         pct = _percent_in(line)
         if pct is not None and on_percent is not None:
             on_percent(pct, last_status)
@@ -393,9 +411,11 @@ def _run_driver(python: Path, *, audio: Path, out_dir: Path, model: str,
             f"separation failed: {failure.get('message', 'unknown error')}"
             + (f"\n\n{detail}" if detail else ""))
     if code != 0:
+        tail = "\n".join(stderr_tail[-15:])
         raise SeparationError(
             f"separation driver exited {code} with no error event.\n"
-            f"Command: {' '.join(cmd)}")
+            f"Command: {' '.join(cmd)}"
+            + (f"\nLast stderr output:\n{tail}" if tail else ""))
     if not result:
         raise SeparationError("separation driver produced no result event")
     return result

@@ -39,6 +39,7 @@
 #include <memory>
 
 #include "audio/BackingPlayer.h"
+#include "audio/ReferenceTone.h"
 #include "audio/TakeRecorder.h"
 #include "dsp/LockFreeTypes.h"
 #include "dsp/AnalysisChain.h"
@@ -154,6 +155,15 @@ public:
         window was closed. */
     TakeRecorder& getTakeRecorder() noexcept { return takeRecorder; }
 
+    /** The piano keyboard's voice: a struck note on demand, for checking a
+        pitch by ear.
+
+        Owned here for the same reason the backing player is — it renders on the
+        audio thread — and mixed in AFTER the monitor gain, so turning your own
+        voice down in the headphones does not also silence the reference you
+        turned it down to hear. */
+    ReferenceTone& getReferenceTone() noexcept { return referenceTone; }
+
     /** M3: the MIDI note the chart says the singer should be on right now, or a
         negative value when no chart is loaded / no note is active.
 
@@ -165,6 +175,17 @@ public:
     void setChartTargetMidi (float midiOrNegative) noexcept
     {
         chartTargetMidi.store (midiOrNegative, std::memory_order_relaxed);
+    }
+
+    /** The chart's A4 reference (song.tuningHz), bridged to the worker the same
+        way the target note is. The detector converts Hz to fractional MIDI
+        against THIS reference, so a chart analysed at 446 Hz scores a singer
+        matching the record as in tune rather than as 26 cents sharp on every
+        note. 440 when no chart is loaded; the editor resets it on unload. */
+    void setChartTuningHz (float hz) noexcept
+    {
+        chartTuningHz.store (hz > 0.0f ? juce::jlimit (400.0f, 480.0f, hz) : 440.0f,
+                             std::memory_order_relaxed);
     }
 
     /** theme.json owns the clarity threshold, but the worker thread must not
@@ -203,8 +224,7 @@ private:
     AnalysisChain  analysisChain;
 
     //== Worker -> GUI =========================================================
-    static constexpr int kEstimateFifoCapacity = 512;   // ~4 s at 125 estimates/s
-
+    // Capacity lives in LockFreeTypes.h (the shared type contract).
     juce::AbstractFifo estimateFifo { kEstimateFifoCapacity };
     std::array<PitchEstimate, (size_t) kEstimateFifoCapacity> estimateStorage {};
 
@@ -215,6 +235,7 @@ private:
     std::atomic<double>  hostSampleRateAtomic { 48000.0 };
     std::atomic<float>   clarityThreshold     { 0.85f };
     std::atomic<float>   chartTargetMidi      { -1.0f };   // <0 == no chart / no active note
+    std::atomic<float>   chartTuningHz        { 440.0f };  // song.tuningHz; 440 == no chart
     std::atomic<bool>    monitorMic           { false };   // mic -> output
     std::atomic<float>   monitorGain          { 0.5f };    // linear, ~-6 dB
 
@@ -223,6 +244,7 @@ private:
     float lastMonitorGain = 0.0f;
 
     BackingPlayer backingPlayer;
+    ReferenceTone referenceTone;
     TakeRecorder  takeRecorder;
     std::atomic<bool>    guiActive            { false };
 

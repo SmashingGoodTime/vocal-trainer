@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vocalchart"
-version = "0.1.0"
+version = "0.1.1"
 description = "Offline pipeline that turns a song into a vocal note chart (chart.json) for the Vocal Trainer app."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -33,6 +33,13 @@ dependencies = [
     "click>=8.1",
     "soundfile>=0.12",
     "mir_eval>=0.8",
+    # Stage 3 (lyrics). None of these needs torch — faster-whisper runs on
+    # CTranslate2 — so they belong HERE, not in .venv-separate. Leaving them
+    # out made a fresh install silently produce charts without lyrics: the
+    # ImportError degrades to a one-line "charting without text" warning.
+    "faster-whisper>=1.2.1",
+    "pyphen>=0.17.2",
+    "cmudict>=1.1.3",
 ]
 
 [project.optional-dependencies]

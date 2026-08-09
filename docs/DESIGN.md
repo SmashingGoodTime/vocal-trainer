@@ -852,7 +852,7 @@ Five product consequences, all of which are genuine differentiators over every k
 
 1. **Feedback fading, on by default after the first week.** Hide the live trace on a randomly chosen ~33% of phrases, revealing the result only after the phrase ends. This forces the singer to use their own auditory feedback during the take. Build it in Milestone 6; do not treat it as optional polish.
 2. **Post-take review is the primary learning surface.** The live highway is the *practice vehicle*; the review screen is the *teacher*.
-3. **Display richness scales inversely with skill.** A "Beginner" view with a piano keyboard reference, note names and big directional arrows; an "Advanced" view stripped to bar + trace.
+3. **Display richness scales inversely with skill.** A "Beginner" view with a piano keyboard reference, note names and big directional arrows; an "Advanced" view stripped to bar + trace. *(Built 2026-08-07 — see M6++. The keyboard, the note names and the staff/plain backgrounds are all theme values, so the two ends of that scale are `theme.json` settings rather than a mode: `showPianoKeyboard` + `showNoteNames` + `backgroundStyle: "staff"` is the beginner end, and `false` + `false` + `"plain"` is the advanced one.)*
 4. **Transposition to range and slow-down practice beat scoring.** `rateFactor` and a global semitone transpose are worth more pedagogically than any scoring refinement. (Yousician's auto-tempo adapts 25–125% in 5% steps; that is the model.)
 5. **Track the pitch centre over 300–500 ms, never instantaneously.** Restated because it is the one mistake that would actively teach the user to sing worse.
 
@@ -900,6 +900,26 @@ Five product consequences, all of which are genuine differentiators over every k
 | Partial-credit halo | `(tZeroCents − tFullCents)` = 75 cents, drawn at 12% alpha behind the bar |
 | Note bar corner radius | 4 px |
 | Trace core thickness | 3 px, scaled ×`clamp(1.0 + rmsDb/60.0, 0.5, 1.6)` by input level |
+
+### Geometry — the beginner-view additions (M6++)
+
+| Property | Value | `theme.json` |
+|---|---|---|
+| Piano keyboard width | **68 px**, dropped below 4× that of remaining lane width | `piano.widthPx` |
+| Black key width | **62%** of the keyboard | `piano.blackKeyWidth` |
+| Key height | **one semitone**, from the lane's own view range | — |
+| White-key labels | all of them above **15 px/semitone**, C only above 8 | — |
+| Transport strip height | **34 px** | `transport.heightPx` |
+| Loop lane height | **10 px** along the top of the strip | — |
+| Loop edge grab radius | **7 px** | — |
+| Shortest loop | **0.25 s** | — |
+| Auto-chosen loop | the phrase at the playhead, **−0.5 s** run-up | — |
+| Rewind step | **5 s**, floored at the loop start | — |
+| Note name height | **11 px**, shrinking to fit inside the bar, floor **7 px** | `highway.noteNameHeightPx`, `noteNameMinBarWidthPx` |
+| Staff lines | E4 G4 B4 D5 F5 / G2 B2 D3 F3 A3, **at true pitch height** | `highway.backgroundStyle` |
+| Ledger lines | C2 E2 **C4** A5 C6, at `staffLedger` | — |
+| Clef gutter | **18 px**, letter on the line it names | — |
+| Single-row toolbar minimum | **790 px** of window width | — |
 
 **The bar's drawn height IS the full-credit window.** This is the single highest-value visual decision in the whole design. Performous does it (`barHeight() { return 2.0 * thresholdForFullScore(); }`) and Harmonix patented it ("the note tubes become 'fatter' or 'skinnier' the easier or harder the game is set to"). It removes any need for a cents readout during the take, because *inside the bar* means *full points* with zero cognitive translation.
 
@@ -1022,6 +1042,87 @@ Added 2026-08-05, alongside M6.
 - **`app/AppSettings`** finally implements the `PropertiesFile` §3 asks for: the song library root, the remembered chooser folders, and the monitor level. The library root resolves as saved value → the repo's `songs/` found by walking up from the executable → `%APPDATA%/VocalTrainer/songs`, mirroring `_default_library()` in the Python CLI so both ends agree on where songs live with no path in either source.
 - **Toolbar** (2026-08-05). Chart mode had reached fourteen visible controls across two rows, three of which did nothing there. Three rules, in order of how much they bought: (1) controls that do not apply are **hidden, not disabled** — the free-sing Target and Free Sing go away in chart mode, because a permanently greyed control is a permanent question about something that is not available at all; (2) the two level **sliders** move behind a `Levels` call-out, since they are the widest controls in the app and are touched once a session, not once a phrase; (3) between-takes tools (`Add song...`, `Edit chart`, `Edit theme...`) move into one `...` menu. What is left fits on one row above ~700 px of window width, which is worth `controlsRow2Height` of highway on every frame. Hiding Free Sing forced the matching change in `AudioEngine`: a loaded chart's target now takes precedence over the Free Sing flag when constraining the τ search, so a toggle left on from an earlier session cannot silently disable octave-error protection with nothing on screen to explain the jumping trace.
 - **Monitor level.** The mic-to-output path is now a ramped gain rather than a clear(), capped at **+6 dB**. Not higher on purpose: this is a live path from a microphone to a speaker, and a monitor control with a lot of makeup gain is a feedback machine with a friendly label. Ramped per block because a step from 0 to the monitor gain is an audible click on every toggle.
+
+### M6++ — The beginner view: keyboard, note names, staff themes, section looping
+Added 2026-08-07. §6's fifth consequence — *"display richness scales inversely with skill: a
+'Beginner' view with a piano keyboard reference, note names and big directional arrows"* —
+had never been built. This is four of those five words, plus the practice loop §6 asks for
+under "phrase ranking, worst-first, with one-click loop-and-retry" made reachable **without a
+take having finished**, because drilling eight bars is what a practice session actually
+consists of.
+
+- **`ui/PianoKeyboardComponent`** — a vertical keyboard down the left of the **free-sing**
+  lane. **Piano-roll geometry, one equal-height key per semitone**, not a photographic
+  keyboard's seven whites across twelve semitones. That is not a stylistic choice: beside a
+  chromatic-linear Y axis, real keyboard geometry only lines up at C and F and is up to half a
+  semitone out everywhere else, and for something whose entire job is "this pitch is here"
+  that is the one failure mode that disqualifies it. Every piano-roll editor ever written
+  reaches the same conclusion for the same reason. It reads its view range from
+  `PitchLaneComponent::getViewLowMidi()` rather than reproducing that mapping, so a key
+  cannot drift from the row it names — the view re-centres, and two copies of that formula
+  would disagree on the first frame after it moved. **Free sing only**: in chart and exercise
+  mode there is a bar to aim at, the bar carries its own note name and the gutter names every
+  row, so a keyboard is a third statement of the same fact costing 68 px of the scrolling
+  view. Its keys are the theme's own colours, not photographic white and black — a near-white
+  slab down the edge of a midnight window is the brightest thing on screen, and the one
+  element there that is only a reference must not out-shout the trace and the bars.
+  The sung-pitch marker uses the singer's **true** pitch, not the octave-folded one the trace
+  draws: the trace folds so a bass singing a soprano line still sees the bar (§7), but the
+  keyboard's question is "which key am I on", where folding would point at a key they are
+  demonstrably not singing.
+- **`audio/ReferenceTone`** — clicking a key strikes it. Four voices, round-robin, so running
+  up the keys is a glissando rather than a series of clicks. Same partial model as
+  `ExerciseAudio` above and deliberately a **second implementation** of it, because the two
+  live on opposite sides of the realtime boundary: one fills a buffer of known length ahead
+  of time, the other advances phasors per sample and must never allocate. Triggered with one
+  atomic store packing `(counter << 8) | midi` into a single word, so the audio thread cannot
+  read a new counter against an old note. `prepare()` publishes the sample rate and touches
+  nothing else; the voices are silenced by `renderInto()` on the thread that owns them, which
+  is the lesson of §11.12 applied before it costs a process rather than after.
+- **Note names on the bars.** Label colour is derived by blending the bar's own fill (alpha
+  included) over the background and taking the contrasting one, rather than being a theme
+  constant — with five presets and four bar states, a fixed label colour is a choice about
+  which combination it is invisible in.
+  **The name lives in the bar, and shrinks to stay there** (down to a 7 px floor). The bar's
+  height is a fixed ±`tFullCents`, so it is only ever as many pixels as the zoom gives a
+  quarter-semitone: an exercise covering a fifth leaves room for 11 px type, a chart spanning
+  a singer's whole range does not. Moving the label above the bar in that case — which is what
+  it used to do, and therefore what it did on nearly every chart — put every name between its
+  own note and the one above it. Shrinking keeps it on the note it names, and only a bar
+  thinner than the floor pushes it outside, where the contrast has to come from the background
+  instead: a label straddling the bar's edge has half its glyphs on the fill and half on the
+  background, and no single colour contrasts with both. Width is **measured**, not assumed —
+  the octave digit is dropped before the name is, and the name is dropped before either is
+  allowed to spill onto the note next door.
+- **`BackgroundStyle`** — `chromatic` | `staff` | `staffAndGrid` | `plain`, and with it the
+  **Sheet Music** and **Staff Dark** presets. **The staff lines are drawn at their true pitch
+  heights**, so E-G-B-D-F is 3-4-3-4 semitones and the spacing is slightly uneven. Real
+  notation spaces a staff diatonically; adopting that here would make a semitone worth a
+  different number of pixels depending on which semitone it was, and the target bar's drawn
+  height *is* `2 × tFullCents` — §7 calls that the highest-value visual decision in the
+  design, and it is worth more than evenly-spaced lines. The clefs are reduced to the letter
+  each one names on the line it names (`G` on G4, `F` with its two dots straddling F3): the
+  Unicode musical symbols U+1D11E/U+1D122 are in no font Windows ships, and a missing-glyph
+  box where the clef should be teaches the wrong thing very firmly.
+- **Theme presets** (`Theme::getPreset` / `applyPreset`). A preset is a complete
+  `ThemeValues`, not a patch, and picking one **rewrites `theme.json`** — that file is the
+  single source of truth and is polled at 4 Hz, so a preset held only in memory would be
+  reverted by the next poll. The reverse is the useful half: the preset name is the fallback
+  base for every missing key, so `{ "preset": "Sheet Music" }` alone is a complete theme.
+  Only **Midnight** and **Sheet Music** carry §7's colour-vision guarantee; the others are
+  preferences, which is affordable precisely because §7 never let hue be load-bearing.
+- **`ui/TransportBarComponent`** — the whole song as a strip: the chart's note density behind
+  a playhead, so the bridge is somewhere you can point at rather than somewhere you seek and
+  overshoot. **The loop lane is a separate strip from the scrub area**, not the same gesture
+  with a modifier: the two commonest actions in a practice session are "jump there" and
+  "drill that", and distinguishing them by an invisible key means destroying a loop you spent
+  time placing every time you meant to seek. A click in the loop lane clears the loop and is
+  the only destructive gesture in the strip.
+- **While a loop is armed the song never ends by itself.** A section ending is not a
+  performance ending, and the review screen appearing during the fourth pass at a bridge
+  interrupts exactly the activity the loop was armed for. Each pass round is a new take, for
+  the reason every other seek is: a score stitched from two attempts describes a performance
+  nobody gave.
 
 **Total to a genuinely useful tool: roughly 3 weekends plus 6 evenings (~70 h).** You are singing against real feedback at the end of hour 12 and against a real chart at the end of hour 34.
 
@@ -1536,3 +1637,77 @@ memory pulled out from under it.
 directly — prepare, load, play, `releaseResources()`, one more `renderInto`. With the guard
 removed the runner exits `0xC0000094`, the same code Windows logged; with it, 11 checks pass.
 A test that only *fails* would not have proved anything here.
+
+### 11.13 Review sweep: two majors in the app, six in the pipeline (2026-08-07)
+
+A full-code review found and fixed the following. The two lessons at the bottom
+matter more than any single item.
+
+**App (C++):**
+
+- **The 11.12 crash guard had introduced a liveness bug.** `releaseResources()`
+  clears `BackingPlayer::prepared`, but `AudioEngine::prepareToPlay()` early-outs
+  when rate and block size are unchanged — so a device restart at the SAME
+  settings (changing the mic channel, a driver hiccup) never re-armed the player:
+  every deck silent, chart time frozen, until the settings genuinely changed.
+  `prepareToPlay()` now re-arms the player unconditionally before the early-out.
+- **`song.tuningHz` was parsed and then used by nothing.** The detector converted
+  Hz to MIDI against A=440 while chart `midi` values are relative to `tuningHz`;
+  on the four add-song charts measured off concert pitch (jennys-tale: 446.66 Hz)
+  a singer matching the record read up to **+26 cents on every note** — beyond
+  the 25-cent full-credit window. Tuning is now bridged to the worker through an
+  atomic (like the clarity threshold) and applied via `setReferenceHz`.
+- Smaller: `processBlock` no longer silences the backing track when the device
+  has no input channels; onset offsets are measured from the first voiced frame
+  rather than the median's first output (a constant ~24 ms "late" bias); the
+  `loadChart` failure path tears down every chart consumer (latent use-after-free);
+  the five test runners are registered with CTest (`ctest` previously ran zero
+  tests while 190 checks sat unrun).
+
+**Pipeline (Python):**
+
+- **The mtime cache trap.** `shutil.copy2` and Explorer copies preserve the
+  source's mtime, so "drop a lyrics.txt in and rebuild" — the CLI's own advice —
+  could hit "words cache hit" and silently ignore the supplied words. Caches now
+  record size+mtime fingerprints of their inputs and compare by EQUALITY (mtime
+  ordering cannot catch a swap); ingested files are re-stamped after copy; the
+  words cache also invalidates on a `--model` change, and notes.json on a
+  vocalchart version change.
+- **The CUDA→CPU whisper fallback could not catch the failure it exists for.**
+  `transcribe()` is a lazy generator; the cudnn DLL failure fires on the first
+  pull, which sat outside the retry loop, degrading to "charting without lyrics"
+  when CPU would have worked. The first segment is now pulled inside the
+  per-device attempt.
+- **Packaging:** `faster-whisper`, `pyphen` and `cmudict` are now declared
+  dependencies (none needs torch); a fresh install used to produce lyric-less
+  charts with a one-line warning.
+- **Word→note attachment now honours its 80 ms tolerance** (the parameter was
+  dead code — a hallucinated word attached to the nearest note however far away),
+  anchors a word on the note where it BEGINS (largest overlap, earliest on a
+  tie) rather than where its midpoint lands, and the melisma branch is reachable
+  (it never was: a held one-syllable word now marks trailing notes
+  `syllableRole: "melisma"`).
+- **Every note started a half hop (~8 ms) late.** SwiftF0 timestamps are frame
+  CENTRES; the segmenter treated the first voiced centre as the note start.
+  Fixed in `_measure`; all charts regenerated.
+- Smaller: chart.json / ultrastar / cache writes are atomic (temp + `os.replace`
+  — the app can re-read chart.json mid-rebuild); the separation driver's stderr
+  tail is kept for the failure report; the printed `.venv-separate` recipe now
+  pins the torch trio and installs it LAST (it used to reproduce the exact
+  CPU-torch trap 11.11 documents); `--keep-click` no longer discards the whole
+  `--exclude` list; hyphenated lyric words keep their tail ("twenty-one" lost
+  "one" in normalisation); `add-song` on a video container can resume (the raw
+  container was hashed against the extracted WAV, which can never match — the
+  input hash is now recorded at ingest); `import-stems` writes a STEREO
+  backing.wav (the band's image was being collapsed to mono for no reason —
+  existing songs keep their mono backing until re-imported).
+
+**Lesson 1 — a fix can be the next bug's cause.** 11.12's `prepared` flag was
+correct and necessary, and it interacted with an early-out written months
+earlier to produce a failure neither piece had alone. Same species as 11.7 and
+11.8: the bug lives in the seam between two individually-correct layers.
+
+**Lesson 2 — the pipeline's worst bugs were all silent degradations.** Missing
+deps, a stale cache, a CUDA failure, an over-tolerant nearest-note match: every
+one produced a chart that LOOKED fine and was quietly worse. Where a failure
+can degrade, the degradation must be loud.

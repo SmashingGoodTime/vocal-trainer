@@ -17,6 +17,8 @@ namespace
     constexpr const char* kLastAudioDir      = "lastAudioDirectory";
     constexpr const char* kMonitorGainDb     = "monitorGainDb";
     constexpr const char* kMonitorEnabled    = "monitorEnabled";
+    constexpr const char* kOutputLatencyMs   = "outputLatencyMs";
+    constexpr const char* kInputLatencyMs    = "inputLatencyMs";
     constexpr const char* kExerciseRootMidi  = "exerciseRootMidi";
     constexpr const char* kExerciseBpm       = "exerciseBpm";
     constexpr const char* kExerciseLengthSec = "exerciseLengthSeconds";
@@ -245,6 +247,35 @@ void AppSettings::setMonitorEnabled (bool shouldMonitor)
 {
     if (props != nullptr)
         props->setValue (kMonitorEnabled, shouldMonitor);
+}
+
+//==============================================================================
+int AppSettings::getOutputLatencyMs() const
+{
+    if (props == nullptr)
+        return 0;
+
+    return juce::jlimit (0, kMaxLatencyMs, props->getIntValue (kOutputLatencyMs, 0));
+}
+
+void AppSettings::setOutputLatencyMs (int ms)
+{
+    if (props != nullptr)
+        props->setValue (kOutputLatencyMs, juce::jlimit (0, kMaxLatencyMs, ms));
+}
+
+int AppSettings::getInputLatencyMs() const
+{
+    if (props == nullptr)
+        return 0;
+
+    return juce::jlimit (0, kMaxLatencyMs, props->getIntValue (kInputLatencyMs, 0));
+}
+
+void AppSettings::setInputLatencyMs (int ms)
+{
+    if (props != nullptr)
+        props->setValue (kInputLatencyMs, juce::jlimit (0, kMaxLatencyMs, ms));
 }
 
 //==============================================================================

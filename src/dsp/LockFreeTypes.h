@@ -50,8 +50,10 @@ namespace vt
 inline constexpr int kChunkFifoCapacity = 64;
 
 /** Depth of the worker -> GUI PitchEstimate AbstractFifo.
-    256 estimates == ~2.05 s at 125 estimates/s. */
-inline constexpr int kEstimateFifoCapacity = 256;
+    512 estimates == ~4.1 s at 125 estimates/s — enough slack that a GUI stall
+    (window drag, modal dialog) drops nothing. AudioEngine sizes its FIFO and
+    storage from this; do not redeclare it there. */
+inline constexpr int kEstimateFifoCapacity = 512;
 
 /** Hop between successive analysis windows, in 16 kHz samples.
     One AudioChunk == one hop == 8 ms == 125 estimates/s. */

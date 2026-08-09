@@ -3,12 +3,12 @@
   "schemaVersion": "1.0",
   "generator": {
     "tool": "vocalchart",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "pitchModel": "swift-f0 0.1.2",
     "lyricSource": "asr",
     "lyricModel": "faster-whisper medium",
     "separator": "none",
-    "generatedAt": "2026-08-04T03:37:06Z"
+    "generatedAt": "2026-08-07T22:05:27Z"
   },
   "song": {
     "id": "synth-demo",
@@ -35,8 +35,8 @@
   "phrases": [
     {
       "id": 0,
-      "startSeconds": 0.567969,
-      "endSeconds": 7.687969,
+      "startSeconds": 0.559969,
+      "endSeconds": 7.679969,
       "text": "",
       "noteIds": [
         0,
@@ -52,7 +52,7 @@
   "notes": [
     {
       "id": 0,
-      "startSeconds": 0.567969,
+      "startSeconds": 0.559969,
       "durationSeconds": 0.976,
       "midi": 55,
       "centsOffset": 2.17,
@@ -64,19 +64,19 @@
     },
     {
       "id": 1,
-      "startSeconds": 1.543969,
+      "startSeconds": 1.535969,
       "durationSeconds": 1.872,
       "midi": 60,
       "centsOffset": -10.1,
       "type": "normal",
       "syllable": null,
-      "syllableRole": "none",
+      "syllableRole": "melisma",
       "phraseId": 0,
       "confidence": 0.989
     },
     {
       "id": 2,
-      "startSeconds": 3.415969,
+      "startSeconds": 3.407969,
       "durationSeconds": 0.512,
       "midi": 64,
       "centsOffset": -5.43,
@@ -88,7 +88,7 @@
     },
     {
       "id": 3,
-      "startSeconds": 3.927969,
+      "startSeconds": 3.919969,
       "durationSeconds": 0.512,
       "midi": 60,
       "centsOffset": -2.05,
@@ -100,7 +100,7 @@
     },
     {
       "id": 4,
-      "startSeconds": 4.439969,
+      "startSeconds": 4.431969,
       "durationSeconds": 1.36,
       "midi": 60,
       "centsOffset": -1.52,
@@ -112,7 +112,7 @@
     },
     {
       "id": 5,
-      "startSeconds": 5.799969,
+      "startSeconds": 5.791969,
       "durationSeconds": 0.96,
       "midi": 64,
       "centsOffset": 1.11,
@@ -124,7 +124,7 @@
     },
     {
       "id": 6,
-      "startSeconds": 6.759969,
+      "startSeconds": 6.751969,
       "durationSeconds": 0.928,
       "midi": 62,
       "centsOffset": -2.55,

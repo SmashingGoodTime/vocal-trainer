@@ -187,6 +187,66 @@ int main()
     }
 
     //==========================================================================
+    // LATENCY COMPENSATION — the arithmetic MainComponent::onVBlank sets up
+    // when the singer is on Bluetooth headphones.
+    //
+    // Pinned here because the two offsets go into setClock through DIFFERENT
+    // arguments and both are easy to get backwards, and getting one backwards
+    // does not crash or look broken: it silently doubles the error it was meant
+    // to remove, and the singer is told they are rushing when they are not.
+    //==========================================================================
+    {
+        constexpr double kOutputLatency = 0.200;   // Bluetooth headphones
+        constexpr double kInputLatency  = 0.010;   // wired interface on the mic
+
+        // The uncompensated case, for reference: the app writes chart second
+        // 5.0 to the device, and a sample stamped at that same instant maps
+        // straight onto it.
+        vt::TimelineMap raw;
+        raw.streamNow = 2400.0;
+        raw.chartNow  = 5.0;
+        check (near (raw.chartTimeFor (2400.0), 5.0, 1.0e-9),
+               "latency: with no offsets the newest sample maps to chartNow");
+
+        vt::TimelineMap map;
+        map.streamNow = 2400.0 + kInputLatency;    // input goes onto streamNow
+        map.chartNow  = 5.0    - kOutputLatency;   // output comes off chartNow
+
+        // THE NOW-LINE follows the OUTPUT leg alone. Chart second 5.0 has been
+        // written to the device but is still in flight; what the singer is
+        // hearing right now is 4.8.
+        check (near (map.chartNow, 4.8, 1.0e-9),
+               "latency: now-line shows what is in the HEADPHONES, not the buffer");
+
+        // THE MICROPHONE follows the FULL ROUND TRIP. A sample arriving now was
+        // sung in reply to a cue that was already 200 ms late, and then took
+        // 10 ms more to get back — so it belongs at 5.0 - 0.210.
+        check (near (map.chartTimeFor (2400.0), 4.79, 1.0e-9),
+               "latency: newest mic sample maps back by the whole round trip",
+               juce::String (map.chartTimeFor (2400.0), 4));
+
+        // Which is the point of the whole exercise: a singer who is DEAD ON
+        // scores dead on. Sung 210 ms after the cue they heard, and credited to
+        // the chart position that cue actually was.
+        check (near (map.chartTimeFor (2400.0), raw.chartNow - kOutputLatency - kInputLatency,
+                     1.0e-9),
+               "latency: a perfectly-timed note scores at its true chart position");
+
+        // Both offsets pull EARLIER, never later. A compensation that moved a
+        // sample forwards would be describing a singer who replied before the
+        // cue reached them.
+        check (map.chartTimeFor (2400.0) < raw.chartTimeFor (2400.0),
+               "latency: compensation only ever moves a sample earlier");
+
+        // The trace must still be on screen with the offsets applied — a
+        // correction that pushes the live samples out of the visible history
+        // has taken the singer's feedback away to fix their timing.
+        check (map.liveSampleIsVisible (2400.0 + kInputLatency)
+                 && map.liveSampleIsVisible (2400.0 + kInputLatency - 0.4),
+               "latency: live trace stays visible with offsets applied");
+    }
+
+    //==========================================================================
     // Credit ramp (DESIGN.md section 6).
     //==========================================================================
     {

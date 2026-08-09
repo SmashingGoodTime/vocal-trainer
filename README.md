@@ -43,7 +43,7 @@ copyleft in the shipped binary, and there is a hard do-not-link list.
 | **M3** | Note highway + full-song practice | **feature-complete** |
 | **M3.5** | Stage 0 separation + **Add song...** from any audio file | **working end to end** |
 | ~~M4~~ | ~~VST3 target + Ableton sync + calibration~~ | **dropped** — standalone only |
-| M5 | Lyrics end to end | not started |
+| M5 | Lyrics end to end | **built** — faster-whisper timing + lyrics.txt alignment, lyric strip, word editing |
 | **M6** | Scoring, post-take review, take recording | **built** |
 | **M6+** | Generated exercises, chart editing, monitor level | **built** |
 
@@ -123,6 +123,15 @@ window width the transport drops onto a second row rather than clipping.
 
 ### Running the tests
 
+All five runners are registered with CTest, so from the build directory:
+
+```
+ctest --output-on-failure
+```
+
+(`ctest.exe` sits next to `cmake.exe` in the Build Tools.) Each runner is also
+an ordinary console app you can run on its own:
+
 ```
 build\vt_tests_artefacts\Release\vt_tests.exe
 build\vt_chart_tests_artefacts\Release\vt_chart_tests.exe
@@ -136,7 +145,15 @@ time queries, octave folding, and chart editing round-tripped through the writer
 (66 checks) — and it parses the REAL `songs/synth-demo/chart.json`, so a schema drift
 between the Python writer and the C++ reader fails there rather than on stage. Build a chart
 first or those checks skip. `vt_render_tests` renders components offscreen and counts pixels,
-which is the only thing that catches "it computes correctly but you cannot see it".
+which is the only thing that catches "it computes correctly but you cannot see it". Set
+`VT_RENDER_DUMP_DIR` to a directory and it writes every frame it renders there as a PNG —
+each theme, the keyboard, the transport strip — which is what to look at when one of its
+checks fails, or when a colour is being tuned:
+
+```powershell
+$env:VT_RENDER_DUMP_DIR = "$env:TEMP\vt-frames"
+build\vt_render_tests_artefacts\Release\vt_render_tests.exe
+```
 
 `vt_score_tests` covers scoring and exercise generation (70 checks). Two of its cases guard
 bugs that would be **invisible while using the app** and would quietly teach you to sing
@@ -227,6 +244,90 @@ Two things the highway does deliberately, which can look like bugs:
 
 Every geometry and colour constant lives in `%APPDATA%\VocalTrainer\theme.json` and
 hot-reloads within 250 ms — no rebuild needed to tune the look.
+
+#### The piano keyboard down the left, in free sing
+
+One key per semitone, lined up with the lane rows beside it, so a key is always at exactly
+the same height as the pitch it names. It shows the note you are aiming at (blue) and where
+your voice actually is (the pointer on the right edge, at your **true** pitch — not the
+octave-folded one the trace draws).
+
+**Click a key to hear it.** Drag down the keys for a glissando. It is the same synthesised
+piano the exercises use for their guide tone, so "what does that note actually sound like?"
+is one click away, which is how every teacher answers that question.
+
+**Free sing only.** Load a chart or an exercise and it goes away: there is a bar to aim at,
+the bar carries its own note name, and the gutter names every row — a keyboard as well would
+be a third copy of the same answer charging 68 px of the view you are reading.
+
+Its keys are drawn in the theme's own colours rather than photographic white and black, so a
+dark theme gets a dark keyboard; a near-white slab would be the brightest thing on screen,
+which is not what a reference should be. It is dropped automatically on a window too narrow
+to spare the width, and turned off entirely with `"piano": { "showPianoKeyboard": false }` in
+`theme.json`.
+
+#### Moving around the song, and drilling one section
+
+The strip under the lyrics is the whole song: the chart's note density behind a playhead, so
+verses, choruses and the gaps between them are visible as shape rather than as a number.
+
+| Gesture / control | What it does |
+|---|---|
+| Click or drag the strip | Scrub. Playback does **not** stop — drop into the chorus and hear it. |
+| `\|<` | Back to the start |
+| `<<` | Back 5 seconds (stops at the loop start while a loop is armed) |
+| Drag the thin lane along the top | Mark a section to loop |
+| Drag a loop edge | Move that end; the other stays put |
+| Click the thin lane | Clear the loop — the only destructive gesture in the strip, which is why it is not the one used for seeking |
+| **Loop** | Arm/disarm. With no section marked yet it loops the phrase you are in, with half a second of run-up |
+
+Turning **Loop** off keeps the section, so running the whole song and then going back to the
+same eight bars does not mean marking them again.
+
+**While a loop is armed the song never ends by itself.** A section ending is not a
+performance ending, and popping the review screen up in the middle of the fourth pass at a
+bridge would interrupt exactly the thing the loop was armed for. Disarm it, or press
+**Review**.
+
+Each pass round the loop starts a new take, for the same reason any other seek does: a score
+stitched together from two attempts describes a performance nobody gave.
+
+#### Themes
+
+**...** → **Theme...** picks one of five:
+
+| Preset | Background | For |
+|---|---|---|
+| **Midnight** | semitone grid | the default — DESIGN.md §7's Okabe-Ito palette |
+| **Sheet Music** | treble + bass staff on paper | reading notation while you sing |
+| **Staff Dark** | staff over a faint semitone grid | the same, without the white screen |
+| **High Contrast** | semitone grid, everything thicker | low vision |
+| **Neon** | semitone grid | preference |
+
+The staff presets draw the staff lines **at their true pitch heights** — E-G-B-D-F is
+3-4-3-4 semitones, so the spacing is slightly uneven. That is on purpose. Real notation
+spaces a staff diatonically, and adopting that here would mean a semitone was worth a
+different number of pixels depending on which semitone it was — which would quietly break
+the one guarantee the display is built on, that the bar's height *is* the tolerance window.
+Every accidental sits exactly where its pitch is instead.
+
+Note names are drawn **inside** the bars as they scroll past, shrinking to stay in the bar
+rather than floating above it — a chart spans a whole range and its bars are thin, and a name
+sitting above its bar reads as belonging to the note above (`"highway": { "showNoteNames":
+false }` to turn them off, `"noteNameShowOctave": false` for `A` rather than `A4`). On a bar
+too narrow for the full name the octave digit goes first, and the name itself before it would
+ever spill onto the note next door.
+
+**Picking a preset rewrites `theme.json`.** That file is the single source of truth for every
+visual constant and is hot-reloaded at 4 Hz, so a preset held only in memory would be
+reverted by the next poll. The reverse works too: a `theme.json` containing nothing but
+`{ "preset": "Sheet Music" }` is a complete, valid theme — every missing key falls back to
+that preset rather than to the defaults.
+
+Only **Midnight** and **Sheet Music** carry the colour-vision guarantee of DESIGN.md §7
+(vermilion `#D55E00` against bluish green `#009E73` stays separable under all three common
+dichromacies). The others are preferences; the geometry — inside the bar or outside it —
+carries the signal in every theme, which is why hue was never allowed to be load-bearing.
 
 **Load chart... opens in your song folder** with no path configured anywhere. It resolves,
 in order: the folder you last loaded a chart from, then the repo's own `songs/` directory
@@ -372,29 +473,31 @@ requires `torch >= 2.3`, and torch must not go anywhere near `.venv`: that one i
 ONNX-only by design, and installing torch *after* `faster-whisper` is exactly
 what produces the `cudnn_ops64_9.dll` failure DESIGN.md:375 warns about.
 
-One-time setup:
+One-time setup — **audio-separator first, the pinned torch trio LAST**:
 
 ```powershell
 py -3.11 -m venv .venv-separate
 .venv-separate\Scripts\python.exe -m pip install `
-    torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 `
-    --index-url https://download.pytorch.org/whl/cu126
-.venv-separate\Scripts\python.exe -m pip install `
     "audio-separator[gpu]==0.44.5"
+.venv-separate\Scripts\python.exe -m pip install `
+    torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 `
+    --index-url https://download.pytorch.org/whl/cu126
 ```
 
 Three things about that recipe are load-bearing:
 
 - **`cu126`, not the `cu124` in DESIGN.md.** The cu124 index stopped carrying
   torch after 2.6; 2.8.0 is only on cu126 and cu128.
-- **`torchvision` is pinned and installed alongside torch.** `audio-separator`
-  depends on `onnx2torch`, which depends on `torchvision`. Leave it out and pip
-  resolves torchvision to its newest release, which drags in a **CPU-only**
-  torch over the CUDA one you just installed — silently, with only a dependency
-  warning. Separation still works; it just takes 20–40 minutes instead of 2.
-  Check with `python -c "import torch; print(torch.cuda.is_available())"`.
-- **Re-run the torch install last if you ever add packages to this venv**, for
-  the same reason.
+- **The pinned trio goes LAST.** `audio-separator` depends on `onnx2torch`,
+  which depends on `torchvision`; any install that runs after torch can let pip
+  resolve torchvision to its newest release, which drags in a **CPU-only**
+  torch over the CUDA one — silently, with only a dependency warning.
+  Separation still works; it just takes 20–40 minutes instead of 2. Installing
+  the exact trio from the cu126 index as the final step makes the CUDA build
+  the one that sticks. Check with
+  `python -c "import torch; print(torch.cuda.is_available())"`.
+- **Re-run that final torch install if you ever add packages to this venv**,
+  for the same reason.
 
 No NVIDIA GPU? Use `/whl/cpu` and `audio-separator[cpu]`; everything works, just
 slowly. Point `VOCALCHART_SEPARATOR_PYTHON` at a different interpreter to
@@ -433,6 +536,7 @@ src/                  C++ app source (namespace vt)
   MainComponent.cpp     the UI shell
   app/AppSettings.cpp   PropertiesFile: song library root, remembered folders, monitor level
   audio/BackingPlayer.cpp  three decks: backing, guide vocal, recorded take
+  audio/ReferenceTone.cpp  the struck note a piano key plays, live on the audio thread
   audio/TakeRecorder.cpp   mic -> WAV, lock-free from the audio thread
   chart/Chart.cpp       the parsed chart, plus the narrow hand-editing API
   chart/ChartWriter.cpp save an edited chart without losing unparsed fields
@@ -441,9 +545,11 @@ src/                  C++ app source (namespace vt)
   exercise/ExerciseAudio.cpp    their metronome click and pitch guide tone
   score/TakeScorer.cpp  per-note scoring off a trailing median, and the take summary
   import/SongImporter.cpp  spawns the offline pipeline, parses its progress
-  ui/Theme.cpp          Okabe-Ito colours, fonts, metrics
+  ui/Theme.cpp          Okabe-Ito colours, fonts, metrics, and the five presets
   ui/PitchLaneComponent.cpp   the pitch lane / live trace
-  ui/NoteHighwayComponent.cpp the scrolling highway, incl. accuracy recolouring
+  ui/NoteHighwayComponent.cpp the scrolling highway, note names, staff background
+  ui/PianoKeyboardComponent.cpp  the reference keyboard down the left edge
+  ui/TransportBarComponent.cpp   scrub, note-density minimap, loop region
   ui/ImportOverlayComponent.cpp  the "preparing your song" panel
   ui/ReviewOverlayComponent.cpp  the post-take review screen
   ui/ChartEditPanelComponent.cpp fix a word, a pitch or a timing by hand

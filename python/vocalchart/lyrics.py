@@ -80,6 +80,8 @@ def transcribe_words(
     `device="auto"` tries CUDA and falls back to CPU, because CTranslate2 needs
     cuDNN DLLs on Windows that are not guaranteed to be present.
     """
+    import itertools
+
     from faster_whisper import WhisperModel
 
     say = progress or (lambda _m: None)
@@ -87,31 +89,44 @@ def transcribe_words(
         else [(device, "float16" if device == "cuda" else "int8")]
 
     model = None
+    segments = None
     last_error: Optional[Exception] = None
 
     for dev, compute in attempts:
         try:
             say(f"loading whisper '{model_size}' on {dev}")
             model = WhisperModel(model_size, device=dev, compute_type=compute)
+
+            # NO VAD. WhisperX's speech-tuned VAD is documented to drop whole
+            # sung lines (issues #828, #536) and cannot be disabled;
+            # faster-whisper's is optional, so simply do not enable it. The
+            # input is already an isolated vocal stem.
+            gen, _info = model.transcribe(
+                str(audio_path),
+                language=language,
+                word_timestamps=True,
+                beam_size=5,
+                condition_on_previous_text=False,   # stops one bad line poisoning the rest
+                vad_filter=False,
+            )
+
+            # transcribe() is LAZY - real inference, and the cuDNN DLL load
+            # that is the documented Windows failure mode (DESIGN.md:375),
+            # happens on the FIRST pull of the generator, not at model
+            # construction. Pull it here, inside the per-device attempt, so a
+            # CUDA-only failure falls back to CPU instead of surfacing later
+            # as "charting without lyrics".
+            it = iter(gen)
+            first = next(it, None)
+            segments = itertools.chain([first], it) if first is not None else iter(())
             break
         except Exception as exc:                      # noqa: BLE001
             last_error = exc
+            model = None
             say(f"  {dev} unavailable ({type(exc).__name__}); trying next")
 
-    if model is None:
+    if model is None or segments is None:
         raise RuntimeError(f"could not start faster-whisper: {last_error}")
-
-    # NO VAD. WhisperX's speech-tuned VAD is documented to drop whole sung lines
-    # (issues #828, #536) and cannot be disabled; faster-whisper's is optional,
-    # so simply do not enable it. The input is already an isolated vocal stem.
-    segments, _info = model.transcribe(
-        str(audio_path),
-        language=language,
-        word_timestamps=True,
-        beam_size=5,
-        condition_on_previous_text=False,   # stops one bad line poisoning the rest
-        vad_filter=False,
-    )
 
     words: List[Word] = []
 
@@ -187,8 +202,16 @@ def _drop_repetition_hallucinations(
 _TOKEN = re.compile(r"[A-Za-z']+")
 
 
+def _tokens(text: str) -> List[str]:
+    """ALL word tokens in `text`, lowercased. "twenty-one" -> ["twenty", "one"]."""
+    return _TOKEN.findall(text.lower().replace("’", "'"))
+
+
 def _normalise(tok: str) -> str:
-    return _TOKEN.findall(tok.lower().replace("’", "'"))[0] if _TOKEN.search(tok) else ""
+    """First word token only — for comparing two single words. Use _tokens()
+    when splitting free text, or a hyphenated compound loses its tail."""
+    found = _tokens(tok)
+    return found[0] if found else ""
 
 
 def align_to_known_lyrics(
@@ -207,7 +230,9 @@ def align_to_known_lyrics(
     """
     say = progress or (lambda _m: None)
 
-    true_tokens = [t for t in (_normalise(t) for t in lyrics_text.split()) if t]
+    # _tokens, not _normalise-per-whitespace-token: "twenty-one" must yield BOTH
+    # words into the true stream, or the tail vanishes from every chart.
+    true_tokens = _tokens(lyrics_text)
 
     if not true_tokens or not asr_words:
         return list(asr_words)
@@ -292,10 +317,17 @@ def syllabify(word: str) -> List[str]:
     """
     global _pyphen_cache
 
-    clean = _normalise(word)
+    found = _tokens(word)
 
-    if not clean:
+    if not found:
         return [word]
+
+    # A hyphenated compound ("twenty-one") syllabifies per part, so the tail is
+    # kept rather than silently dropped with the first token.
+    if len(found) > 1:
+        return [s for part in found for s in syllabify(part)]
+
+    clean = found[0]
 
     if _pyphen_cache is None:
         try:
@@ -374,14 +406,43 @@ def assign_syllables_to_notes(
 
     order = sorted(range(len(notes)), key=lambda i: notes[i].startSeconds)
     mids = [notes[i].startSeconds + notes[i].durationSeconds * 0.5 for i in order]
+    spans = [(notes[i].startSeconds,
+              notes[i].startSeconds + notes[i].durationSeconds) for i in order]
 
-    # --- bucket every word onto its nearest note, in time order --------------
+    def _gap(i: int, w: Word) -> float:
+        """Time between the word's span and note i's span. 0 == they overlap."""
+        s, e = spans[i]
+        return max(s - w.end, w.start - e, 0.0)
+
+    def _overlap(i: int, w: Word) -> float:
+        s, e = spans[i]
+        return max(0.0, min(e, w.end) - max(s, w.start))
+
+    # --- bucket every word onto its anchor note, in time order ---------------
+    # Anchor = the overlapping note with the LARGEST overlap, earliest on a tie
+    # — a word held across several notes must anchor where it BEGINS, not where
+    # its midpoint happens to fall. Words overlapping nothing take the nearest
+    # note by gap — CAPPED at `tolerance`. Without the cap, a hallucinated word
+    # or one whose timestamp drifted into an instrumental break got slapped
+    # onto a note seconds away, in the wrong phrase. Unassigned is better.
     buckets: dict = {}
+    dropped_far = 0
 
     for w in sorted(words, key=lambda x: (x.start, x.end)):
-        centre = 0.5 * (w.start + w.end)
-        k = min(range(len(mids)), key=lambda i: abs(mids[i] - centre))
+        # Overlap quantised to 1 ms: two notes covering equal halves of a held
+        # word must TIE (and the earlier one win), not be split by float dust.
+        k = min(range(len(spans)),
+                key=lambda i: (_gap(i, w), -round(_overlap(i, w), 3), spans[i][0]))
+
+        if _gap(k, w) > tolerance:
+            dropped_far += 1
+            continue
+
         buckets.setdefault(k, []).append(w)
+
+    if dropped_far:
+        say(f"left {dropped_far} words unassigned "
+            f"(no note within {int(tolerance * 1000)} ms of them)")
 
     assigned = 0
     crowded = 0
@@ -399,11 +460,24 @@ def assign_syllables_to_notes(
         # A single multi-syllable word may spread onto following EMPTY notes,
         # which is what actually happens when a word is sung across a pitch move.
         if len(bucket) == 1:
-            syls = syllabify(bucket[0].text)
+            w = bucket[0]
+            syls = syllabify(w.text)
             free = [k]
 
+            # Following bucket-free notes join this word while either (a) a
+            # syllable still needs a note, or (b) the note starts under the
+            # word's own span — (b) is a syllable HELD across a pitch move,
+            # i.e. a melisma, which is what makes the else-branch below
+            # reachable at all. (It used to be dead code: `free` was capped at
+            # the syllable count, so the pipeline never emitted a melisma.)
             j = k + 1
-            while len(free) < len(syls) and j < len(mids) and j not in buckets:
+            while j < len(mids) and j not in buckets:
+                needs_syllable = len(free) < len(syls)
+                under_word = spans[j][0] < w.end + tolerance
+
+                if not (needs_syllable or under_word):
+                    break
+
                 free.append(j)
                 j += 1
 

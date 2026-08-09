@@ -1,5 +1,6 @@
 #include "NoteHighwayComponent.h"
 
+#include "NoteNaming.h"
 #include "../chart/PitchMath.h"
 
 #include <algorithm>
@@ -12,13 +13,45 @@ namespace
 {
     constexpr float kNaNf = std::numeric_limits<float>::quiet_NaN();
 
-    const char* const kNoteNames[12] =
-        { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    //== Staff geometry =======================================================
+    // The five lines of each staff, bottom to top, as MIDI notes.
+    //
+    // Treble is the G-clef staff and bass the F-clef staff. Between them sits
+    // middle C, which belongs to neither and is why it needs a ledger line —
+    // the one piece of notation every beginner meets first.
+    //
+    // NAMED IN MIDI, NOT IN LETTERS, ON PURPOSE. Musicians write these as
+    // E4-G4-B4-D5-F5 and G2-B2-D3-F3-A3 in scientific pitch notation, but this
+    // app's octave numbers follow Ableton (middle C is C3 — see NoteNaming.h),
+    // so the SAME lines are labelled E3-G3-B3-D4-F4 and G1-B1-D2-F2-A2 on
+    // screen. The pitches are identical either way, and the letter is the part
+    // staff reading is actually about; the digit is a DAW convention that no
+    // notation textbook prints. Writing the MIDI numbers means the constants
+    // cannot be "corrected" into the wrong octave by whichever convention the
+    // reader has in their head.
+    const int kTrebleStaffMidi[5] = { 64, 67, 71, 74, 77 };
+    const int kBassStaffMidi[5]   = { 43, 47, 50, 53, 57 };
 
-    juce::String midiName (int midi)
-    {
-        return juce::String (kNoteNames[((midi % 12) + 12) % 12]) + juce::String (midi / 12 - 1);
-    }
+    /** Ledger lines, drawn faintly. Only the ones a singer actually reaches:
+        MIDI 60 between the staves, then two above the treble staff and two
+        below the bass. Beyond those, notation is not what is failing them. */
+    const int kLedgerMidi[] = { 36, 40, 60, 81, 84 };
+
+    constexpr int kTrebleClefAnchorMidi = 67;   // the line the G-clef curls on
+    constexpr int kBassClefAnchorMidi   = 53;   // the line the F-clef's dots straddle
+
+    /** Width of the clef gutter, in px. Wide enough for one bold letter at the
+        grid label size and the bracket beside it. */
+    constexpr float kClefGutterPx = 18.0f;
+
+    /** How small the note name on a bar may shrink before shrinking it further
+        would be pointless — below this nobody can read it anyway, so it stays
+        at this size and simply overhangs a very thin bar. */
+    constexpr float kMinNoteNameHeightPx = 7.0f;
+
+    /** Clearance the name needs inside its bar, total, left plus right. A label
+        touching both ends of its bar reads as a bar made of text. */
+    constexpr float kNoteNamePaddingPx = 4.0f;
 }
 
 //==============================================================================
@@ -175,6 +208,17 @@ void NoteHighwayComponent::setEditMode (bool shouldEdit)
     if (! editMode)
         selectedNoteId = -1;
 
+    repaint();
+}
+
+void NoteHighwayComponent::setGutterLabelsVisible (bool shouldShow)
+{
+    if (gutterLabels == shouldShow)
+        return;
+
+    gutterLabels = shouldShow;
+
+    bgLowMidi = bgHighMidi = -1.0f;    // the labels live in the buffered layer
     repaint();
 }
 
@@ -409,6 +453,34 @@ void NoteHighwayComponent::BackgroundLayer::paint (juce::Graphics& g)
 
     g.fillAll (v.background);
 
+    switch (v.backgroundStyle)
+    {
+        case BackgroundStyle::plain:
+            break;
+
+        case BackgroundStyle::staff:
+            paintStaff (g, area);
+            break;
+
+        case BackgroundStyle::staffAndGrid:
+            paintChromaticGrid (g, area, v.staffGridAlpha);
+            paintStaff (g, area);
+            break;
+
+        case BackgroundStyle::chromatic:
+        default:
+            paintChromaticGrid (g, area, 1.0f);
+            break;
+    }
+}
+
+//==============================================================================
+void NoteHighwayComponent::BackgroundLayer::paintChromaticGrid (juce::Graphics& g,
+                                                                juce::Rectangle<float> area,
+                                                                float alpha)
+{
+    const auto& v = owner.theme.get();
+
     const auto lo = (int) std::floor (owner.viewLowMidi);
     const auto hi = (int) std::ceil  (owner.viewHighMidi);
 
@@ -427,19 +499,101 @@ void NoteHighwayComponent::BackgroundLayer::paint (juce::Graphics& g)
 
         const bool isC = (((midi % 12) + 12) % 12) == 0;
 
-        g.setColour (isC ? v.gridLineOctave : v.gridLine);
+        g.setColour ((isC ? v.gridLineOctave : v.gridLine).withMultipliedAlpha (alpha));
         g.fillRect (area.getX(), y - 0.5f, area.getWidth(),
                     isC ? v.gridLineOctaveThickPx : v.gridLineThicknessPx);
 
-        if (isC || (hi - lo) <= 24)
+        if (owner.gutterLabels && (isC || (hi - lo) <= 24))
         {
-            g.setColour (v.gridLabel);
-            g.drawText (midiName (midi),
-                        juce::Rectangle<float> (area.getX() + 4.0f, y - v.gridLabelHeightPx,
+            // Past the clef gutter when there is one, or the note name and the
+            // clef letter land on each other at the two pitches the clefs name.
+            const auto labelX = area.getX() + 4.0f
+                                  + (v.backgroundStyle == BackgroundStyle::staffAndGrid
+                                       ? kClefGutterPx : 0.0f);
+
+            g.setColour (v.gridLabel.withMultipliedAlpha (alpha));
+            g.drawText (midiNoteName (midi),
+                        juce::Rectangle<float> (labelX, y - v.gridLabelHeightPx,
                                                 46.0f, v.gridLabelHeightPx),
                         juce::Justification::centredLeft, false);
         }
     }
+}
+
+//==============================================================================
+void NoteHighwayComponent::BackgroundLayer::paintStaff (juce::Graphics& g,
+                                                        juce::Rectangle<float> area)
+{
+    const auto& v = owner.theme.get();
+
+    const auto lo = owner.viewLowMidi - 1.0f;
+    const auto hi = owner.viewHighMidi + 1.0f;
+
+    // Full width, INCLUDING under the clef. That is what a staff looks like —
+    // the clef sits on the lines, it does not push them out of the way — and it
+    // is paintClef's job to keep itself legible over them.
+    const auto drawLine = [&] (int midi, juce::Colour colour, float thickness)
+    {
+        if ((float) midi < lo || (float) midi > hi)
+            return;
+
+        const auto y = owner.yForMidi ((float) midi);
+        g.setColour (colour);
+        g.fillRect (area.getX(), y - thickness * 0.5f, area.getWidth(), thickness);
+    };
+
+    // Ledgers first, so a real staff line always wins where the two coincide.
+    for (const auto midi : kLedgerMidi)
+        drawLine (midi, v.staffLedger, v.staffLedgerThicknessPx);
+
+    for (const auto midi : kTrebleStaffMidi)
+        drawLine (midi, v.staffLine, v.staffLineThicknessPx);
+
+    for (const auto midi : kBassStaffMidi)
+        drawLine (midi, v.staffLine, v.staffLineThicknessPx);
+
+    paintClef (g, area, kTrebleClefAnchorMidi, "G", false);
+    paintClef (g, area, kBassClefAnchorMidi,   "F", true);
+}
+
+//==============================================================================
+void NoteHighwayComponent::BackgroundLayer::paintClef (juce::Graphics& g,
+                                                       juce::Rectangle<float> area,
+                                                       int anchorMidi, const char* letter,
+                                                       bool withDots)
+{
+    const auto& v = owner.theme.get();
+
+    if ((float) anchorMidi < owner.viewLowMidi || (float) anchorMidi > owner.viewHighMidi)
+        return;
+
+    const auto y = owner.yForMidi ((float) anchorMidi);
+    const auto h = juce::jmax (10.0f, v.gridLabelHeightPx + 3.0f);
+
+    const juce::Rectangle<float> box (area.getX() + 2.0f, y - h * 0.5f, kClefGutterPx - 4.0f, h);
+
+    // A chip of background behind the letter, because the line it names runs
+    // straight through the middle of it and would otherwise strike it out.
+    g.setColour (v.background);
+    g.fillRect (box.expanded (1.0f, 0.0f));
+
+    g.setColour (v.staffLine);
+    g.setFont (juce::FontOptions (h, juce::Font::bold));
+    g.drawText (juce::String (letter), box, juce::Justification::centred, false);
+
+    if (! withDots)
+        return;
+
+    // The F-clef's two dots straddle the F line, which is the entire reason the
+    // clef is positioned where it is. Half a semitone either side puts them in
+    // the spaces above and below, exactly where they belong.
+    const auto dotOffset = std::abs (owner.yForMidi ((float) anchorMidi + 0.5f) - y);
+    const auto d = juce::jlimit (1.5f, 3.0f, dotOffset * 0.5f);
+
+    const auto cx = area.getX() + kClefGutterPx - 2.0f;
+
+    g.fillEllipse (cx - d, y - dotOffset - d, d * 2.0f, d * 2.0f);
+    g.fillEllipse (cx - d, y + dotOffset - d, d * 2.0f, d * 2.0f);
 }
 
 //==============================================================================
@@ -600,6 +754,8 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
             g.drawRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
                                     v.noteBarCornerRadiusPx, v.targetBarBorderPx);
 
+            // No name: there is no pitch to aim at, and labelling one would
+            // invite the singer to chase a note that is not being scored.
             if (n.id == selectedNoteId)
                 paintSelection (g, x0, cy, w, haloHeight);
 
@@ -641,13 +797,22 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
                 }
             }
 
+            // A never-sung note keeps its name but at reduced weight: it is
+            // still a note you could go back and learn, not a result.
+            paintNoteName (g, n, x0, w, cy, barHeight,
+                           score->hasData ? scored.withAlpha (v.scoredBarAlpha)
+                                          : juce::Colours::transparentBlack,
+                           score->hasData ? 1.0f : 0.55f);
+
             if (n.id == selectedNoteId)
                 paintSelection (g, x0, cy, w, haloHeight);
 
             continue;
         }
 
-        g.setColour (active ? barColour : barColour.withAlpha (v.upcomingBarAlpha));
+        const auto fill = active ? barColour : barColour.withAlpha (v.upcomingBarAlpha);
+
+        g.setColour (fill);
         g.fillRoundedRectangle (x0, cy - barHeight * 0.5f, w, barHeight,
                                 v.noteBarCornerRadiusPx);
 
@@ -658,9 +823,89 @@ void NoteHighwayComponent::paintNotes (juce::Graphics& g, juce::Rectangle<float>
                                     v.noteBarCornerRadiusPx, v.targetBarBorderPx);
         }
 
+        paintNoteName (g, n, x0, w, cy, barHeight, fill, active ? 1.0f : 0.85f);
+
         if (n.id == selectedNoteId)
             paintSelection (g, x0, cy, w, haloHeight);
     }
+}
+
+//==============================================================================
+void NoteHighwayComponent::paintNoteName (juce::Graphics& g, const ChartNote& n,
+                                          float x0, float w, float cy, float barHeight,
+                                          juce::Colour interior, float alphaScale)
+{
+    const auto& v = theme.get();
+
+    if (! v.showNoteNames || v.noteNameAlpha <= 0.0f)
+        return;
+
+    // A floor the theme can raise to suppress labels on short notes entirely.
+    // Zero by default: the measured fit below is what actually decides, and it
+    // cannot be fooled by a longer name or a bigger font.
+    if (w < v.noteNameMinBarWidthPx)
+        return;
+
+    // THE NAME STAYS IN THE BAR, AND SHRINKS TO STAY THERE.
+    //
+    // It used to jump ABOVE the bar the moment the bar was thinner than the
+    // type, which on a real song is most of the time: the bar's height is a
+    // fixed +/- tFull cents, so it is only ever as many pixels as the zoom gives
+    // a quarter of a semitone — and a chart zooms out to a whole singer's range
+    // where an exercise covers a fifth. That is why the names looked right on
+    // exercises and wrong on charts: on a chart every one of them was floating
+    // in the halo above its bar, nearer the note ABOVE the one it named.
+    //
+    // Shrinking first keeps the name on the thing it names. Only when the bar is
+    // thinner than the smallest legible type does it go outside — and then it
+    // has to, because a label straddling the edge of the bar has half its glyphs
+    // on the fill and half on the background and no single colour contrasts with
+    // both.
+    const auto maxH    = juce::jmax (kMinNoteNameHeightPx, v.noteNameHeightPx);
+    const auto insideH = barHeight - 2.0f;
+
+    const bool insideBar = insideH >= kMinNoteNameHeightPx;
+    const auto h         = insideBar ? juce::jmin (maxH, insideH) : maxH;
+
+    const auto top = insideBar ? cy - h * 0.5f
+                               : cy - barHeight * 0.5f - h - 1.0f;
+
+    if (top < 0.0f || top + h > (float) getHeight())
+        return;
+
+    const juce::Font font { juce::FontOptions (h) };
+
+    // MEASURED, not assumed. A label wider than its bar points at the note next
+    // door, so the octave digit goes before the name does, and the name goes
+    // before it is ever allowed to spill: "C" on a passing sixteenth is worth
+    // more than nothing, and worth less than pointing at the wrong note.
+    auto name  = midiNoteName (n.midi, v.noteNameShowOctave);
+    auto textW = juce::GlyphArrangement::getStringWidth (font, name);
+
+    if (textW + kNoteNamePaddingPx > w && v.noteNameShowOctave)
+    {
+        name  = midiNoteName (n.midi, false);
+        textW = juce::GlyphArrangement::getStringWidth (font, name);
+    }
+
+    if (textW + kNoteNamePaddingPx > w)
+        return;
+
+    // Contrast against WHAT THE LABEL IS ACTUALLY ON. Inside the bar that is the
+    // bar's fill; above it, the bar is not underneath any more and the pixels
+    // there are the background (through the partial-credit halo, which is a few
+    // percent alpha). Using the fill in both cases put white text from a solid
+    // active bar onto a pale halo, which was invisible in exactly the moment the
+    // note mattered most — and only on the light themes, and only at zoom levels
+    // where the bar is too short to hold the text.
+    const auto blended = insideBar ? v.background.overlaidWith (interior)
+                                   : v.background;
+
+    g.setColour (blended.contrasting (0.95f)
+                        .withAlpha (juce::jlimit (0.0f, 1.0f, v.noteNameAlpha * alphaScale)));
+    g.setFont (font);
+    g.drawText (name, juce::Rectangle<float> (x0, top, w, h),
+                juce::Justification::centred, false);
 }
 
 //==============================================================================

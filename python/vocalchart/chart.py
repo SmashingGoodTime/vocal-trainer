@@ -716,11 +716,14 @@ class Chart:
         )
 
     def write_json(self, path: str | Path, indent: int = 2) -> Path:
-        """Write chart.json. UTF-8, no BOM, LF, trailing newline."""
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(self.to_json(indent=indent) + "\n", encoding="utf-8", newline="\n")
-        return out
+        """Write chart.json. UTF-8, no BOM, LF, trailing newline.
+
+        Atomic (temp file + os.replace): chart.json is read by the JUCE app,
+        which may re-load it while a rebuild is running — it must never be able
+        to observe a truncated file where a good one was."""
+        from .paths import atomic_write_text
+
+        return atomic_write_text(path, self.to_json(indent=indent) + "\n")
 
     @classmethod
     def read_json(cls, path: str | Path) -> "Chart":

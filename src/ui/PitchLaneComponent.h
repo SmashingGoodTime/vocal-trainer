@@ -97,6 +97,18 @@ public:
     /** True while the trail contains at least one voiced sample. */
     bool hasSignal() const noexcept  { return ringCount > 0; }
 
+    //== The view range, published for the piano keyboard =====================
+    /** The visible vertical span, in MIDI, in the same form the highway
+        publishes it. Both views map pitch to Y linearly over their own bounds,
+        so one keyboard component serves both from these two numbers — the
+        alternative being a second copy of this class's geometry living in the
+        keyboard, waiting to disagree with it. */
+    float getViewLowMidi()  const noexcept { return laneCentreMidi - semitonesVisible * 0.5f; }
+    float getViewHighMidi() const noexcept { return laneCentreMidi + semitonesVisible * 0.5f; }
+
+    /** The note being aimed at, or -1 in Free Sing where there is not one. */
+    int getTargetNote() const noexcept { return freeSing ? -1 : targetMidi; }
+
     //==========================================================================
     void paint (juce::Graphics&) override;
     void paintOverChildren (juce::Graphics&) override;

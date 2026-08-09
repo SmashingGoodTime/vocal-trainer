@@ -25,16 +25,6 @@ namespace
 {
     constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
 
-    inline float midiToHz (float midi) noexcept
-    {
-        return 440.0f * std::pow (2.0f, (midi - 69.0f) / 12.0f);
-    }
-
-    inline float hzToMidi (float hz) noexcept
-    {
-        return 69.0f + 12.0f * std::log2 (hz / 440.0f);
-    }
-
     // Free Sing search range (DESIGN.md §5).
     constexpr float kFreeSingMinHz = 80.0f;
     constexpr float kFreeSingMaxHz = 1100.0f;
@@ -136,6 +126,18 @@ private:
         const bool freeSing = owner.pFreeSing != nullptr
                                 && owner.pFreeSing->load (std::memory_order_relaxed) > 0.5f;
 
+        // The chart's A4 reference. The detector's Hz -> fractional MIDI
+        // conversion must use it, or a chart analysed off concert pitch scores
+        // every note with a constant bias (song.tuningHz, DESIGN.md §3:
+        // "NEVER assume 440"). 440 whenever no chart is loaded.
+        const float tuning = owner.chartTuningHz.load (std::memory_order_relaxed);
+
+        if (! juce::approximatelyEqual (tuning, lastTuningHz))
+        {
+            detector.setReferenceHz (tuning);   // [DSP-API]
+            lastTuningHz = tuning;
+        }
+
         float minHz = kFreeSingMinHz;
         float maxHz = kFreeSingMaxHz;
 
@@ -153,14 +155,14 @@ private:
 
         if (chartTarget >= 0.0f)
         {
-            minHz = midiToHz (chartTarget - 12.0f);
-            maxHz = midiToHz (chartTarget + 12.0f);
+            minHz = (float) fracMidiToHz (chartTarget - 12.0f, tuning);
+            maxHz = (float) fracMidiToHz (chartTarget + 12.0f, tuning);
         }
         else if (! freeSing && owner.pTargetNote != nullptr)
         {
             const float target = owner.pTargetNote->load (std::memory_order_relaxed);
-            minHz = midiToHz (target - 12.0f);
-            maxHz = midiToHz (target + 12.0f);
+            minHz = (float) fracMidiToHz (target - 12.0f, tuning);
+            maxHz = (float) fracMidiToHz (target + 12.0f, tuning);
         }
 
         if (! juce::approximatelyEqual (minHz, lastMinHz) || ! juce::approximatelyEqual (maxHz, lastMaxHz))
@@ -252,11 +254,9 @@ private:
     int     writeIndex  = 0;
     int64_t samplesSeen = 0;
 
-    std::array<float, 3> history { kNaN, kNaN, kNaN };
-    int   medianCount = 0;
-
-    float lastMinHz = -1.0f;
-    float lastMaxHz = -1.0f;
+    float lastMinHz    = -1.0f;
+    float lastMaxHz    = -1.0f;
+    float lastTuningHz = -1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AnalysisWorker)
 };
@@ -359,11 +359,25 @@ void AudioEngine::prepareToPlay (double sampleRate, int maximumExpectedSamplesPe
 
     hostSampleRateAtomic.store (sampleRate, std::memory_order_relaxed);
 
+    // ALWAYS re-arm the backing player, even when nothing else below needs
+    // doing. releaseResources() cleared its `prepared` flag (the §11.12 crash
+    // guard), and renderInto() bails on that flag before anything else — so a
+    // device restart at an UNCHANGED rate and block size, which skips the rest
+    // of this function, would otherwise leave every deck silent and chart time
+    // frozen until the settings genuinely changed. prepare() is cheap and
+    // idempotent at the same size, which is exactly what this path needs.
+    backingPlayer.prepare (sampleRate, block);
+
+    // Same reasoning, and equally cheap: publishing the rate is one atomic
+    // store, and the tone silences itself on the audio thread only if the rate
+    // actually moved.
+    referenceTone.prepare (sampleRate);
+
     const bool configurationChanged = ! juce::approximatelyEqual (sampleRate, lastPreparedRate)
                                         || block != lastPreparedBlock;
 
     if (! configurationChanged)
-        return;                     // same rate and block size: nothing to do.
+        return;                     // same rate and block size: nothing else to do.
 
     // A rate change mid-recording would append samples at the new rate to a WAV
     // whose header states the old one, i.e. a take that plays back at the wrong
@@ -379,10 +393,6 @@ void AudioEngine::prepareToPlay (double sampleRate, int maximumExpectedSamplesPe
     monoScratch.setSize (1, block, false, false, true);
 
     analysisChain.prepare (sampleRate, block);   // [DSP-API]
-
-    // Renders nothing unless a track is loaded AND playing, so preparing it
-    // unconditionally costs nothing.
-    backingPlayer.prepare (sampleRate, block);
 }
 
 void AudioEngine::releaseResources()
@@ -433,48 +443,53 @@ void AudioEngine::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuff
     const int64_t blockStart = hostSampleCounter;
     hostSampleCounter += numSamples;
 
-    if (numSamples <= 0 || numIn <= 0)
+    if (numSamples <= 0)
         return;
 
     //----------------------------------------------------------------------
     // 2. Sum to mono into the preallocated scratch buffer, then feed the
     //    analysis chain. Sliced, so an over-large block cannot overrun.
+    //
+    //    Skipped — not returned from — when there is no input to analyse. An
+    //    output-only device, or simply no mic channel selected yet, must not
+    //    silence the backing track: the output stage below runs regardless.
     //----------------------------------------------------------------------
     const int capacity = monoScratch.getNumSamples();
 
-    if (capacity <= 0)
-        return;
-
-    float* const mono = monoScratch.getWritePointer (0);
-
-    for (int offset = 0; offset < numSamples; offset += capacity)
+    if (numIn > 0 && capacity > 0)
     {
-        const int n = juce::jmin (capacity, numSamples - offset);
+        float* const mono = monoScratch.getWritePointer (0);
 
-        juce::FloatVectorOperations::copy (mono, buffer.getReadPointer (0, offset), n);
-
-        if (numIn >= 2)
+        for (int offset = 0; offset < numSamples; offset += capacity)
         {
-            juce::FloatVectorOperations::add (mono, buffer.getReadPointer (1, offset), n);
-            juce::FloatVectorOperations::multiply (mono, 0.5f, n);
+            const int n = juce::jmin (capacity, numSamples - offset);
+
+            juce::FloatVectorOperations::copy (mono, buffer.getReadPointer (0, offset), n);
+
+            if (numIn >= 2)
+            {
+                juce::FloatVectorOperations::add (mono, buffer.getReadPointer (1, offset), n);
+                juce::FloatVectorOperations::multiply (mono, 0.5f, n);
+            }
+
+            analysisChain.processBlock (mono, n, blockStart + offset);   // [DSP-API]
+
+            // Recorded from the SAME mono sum the detector just analysed, and
+            // BEFORE the monitor gain and the backing track are applied below.
+            // Both halves of that matter: a take that was not the analysed
+            // signal makes "the score disagrees with what I hear" unresolvable,
+            // and a take with the backing track bled into it is useless for
+            // hearing your own pitch.
+            takeRecorder.write (mono, n);
         }
 
-        analysisChain.processBlock (mono, n, blockStart + offset);   // [DSP-API]
-
-        // Recorded from the SAME mono sum the detector just analysed, and BEFORE
-        // the monitor gain and the backing track are applied below. Both halves
-        // of that matter: a take that was not the analysed signal makes "the
-        // score disagrees with what I hear" unresolvable, and a take with the
-        // backing track bled into it is useless for hearing your own pitch.
-        takeRecorder.write (mono, n);
+        //------------------------------------------------------------------
+        // 3. Wake the worker. signal() on an already-signalled event is a
+        //    no-op and does not block, so this is safe on the audio thread.
+        //------------------------------------------------------------------
+        if (analysisChain.getNumChunksReady() > 0)
+            chunkReady.signal();
     }
-
-    //----------------------------------------------------------------------
-    // 3. Wake the worker. signal() on an already-signalled event is a no-op and
-    //    does not block, so this is safe on the audio thread.
-    //----------------------------------------------------------------------
-    if (analysisChain.getNumChunksReady() > 0)
-        chunkReady.signal();
 
     //----------------------------------------------------------------------
     // 4. Output stage — strictly AFTER the analysis chain has read the input.
@@ -509,6 +524,12 @@ void AudioEngine::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuff
     // 4b. Backing track and guide vocal go in AFTER the mic is cleared, so they
     //     are unaffected by the monitor setting.
     backingPlayer.renderInto (buffer);
+
+    // 4c. The piano keyboard's reference note, last. Also after the monitor
+    //     gain, and for the same reason as the backing track: a singer who has
+    //     turned their own voice down in the headphones has not asked to lose
+    //     the note they clicked a key to hear.
+    referenceTone.renderInto (buffer);
 }
 
 //==============================================================================
